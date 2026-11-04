@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: iterable-swift-sdk
+  description: Gusto fork of Iterable's iOS SDK for receiving and tracking push notifications.
+  annotations:
+    github.com/project-slug: Gusto/iterable-swift-sdk
+spec:
+  type: library
+  owner: team-mobile-platform
+  lifecycle: stable
