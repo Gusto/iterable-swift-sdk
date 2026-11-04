@@ -46,7 +46,11 @@ class RequestHandlerTests: XCTestCase {
             "systemName": device.systemName,
             "systemVersion": device.systemVersion,
             "model": device.model,
-            "identifierForVendor": device.identifierForVendor!.uuidString
+            "identifierForVendor": device.identifierForVendor!.uuidString,
+            "mobileFrameworkInfo": [
+                "frameworkType": "native",
+                "iterableSdkVersion": "6.x.x"
+            ]
         ]
         let deviceDict: [String: Any] = [
             "token": registerTokenInfo.hexToken,
@@ -73,11 +77,187 @@ class RequestHandlerTests: XCTestCase {
             TestUtils.validate(request: request, apiEndPoint: Endpoint.api, path: Const.Path.registerDeviceToken)
             var requestBody = request.bodyDict
             requestBody.removeValue(forKey: "createdAt")
-            XCTAssertTrue(TestUtils.areEqual(dict1: bodyDict, dict2: requestBody))
+            
+            // Compare each field individually for better error messages
+            let requestDevice = requestBody["device"] as! [String: Any]
+            let requestDataFields = requestDevice["dataFields"] as! [String: Any]
+            let expectedDevice = deviceDict
+            let expectedDataFields = dataFields
+            
+            XCTAssertEqual(requestDevice["token"] as? String, expectedDevice["token"] as? String, "token mismatch")
+            XCTAssertEqual(requestDevice["applicationName"] as? String, expectedDevice["applicationName"] as? String, "applicationName mismatch")
+            XCTAssertEqual(requestDevice["platform"] as? String, expectedDevice["platform"] as? String, "platform mismatch")
+            
+            for (key, value) in expectedDataFields {
+                XCTAssertEqual(requestDataFields[key] as? String, value as? String, "\(key) mismatch")
+            }
+            
             expectation1.fulfill()
         }
 
         wait(for: [expectation1], timeout: testExpectationTimeout)
+    }
+
+    func testOfflineRegisterTokenReplaysWithExpectedBody() throws {
+        let registerTokenInfo = createRegisterTokenInfo()
+        let bodyValidated = expectation(description: #function)
+        let networkSession = MockNetworkSession()
+        networkSession.requestCallback = { request in
+            self.validateRegisterTokenRequest(request,
+                                              registerTokenInfo: registerTokenInfo,
+                                              notificationsEnabled: true)
+            bodyValidated.fulfill()
+        }
+
+        let requestHandler = createRequestHandler(networkSession: networkSession,
+                                                  notificationCenter: MockNotificationCenter(),
+                                                  selectOffline: true)
+
+        requestHandler.register(registerTokenInfo: registerTokenInfo,
+                                notificationStateProvider: MockNotificationStateProvider(enabled: true),
+                                onSuccess: nil,
+                                onFailure: nil)
+
+        waitForTaskRunner(requestHandler: requestHandler, expectation: bodyValidated)
+    }
+
+    func testOfflineRegisterTokenRetriesAfterNetworkFailureWithSnapshottedNotificationsEnabled() throws {
+        let registerTokenInfo = createRegisterTokenInfo()
+        let notificationCenter = MockNotificationCenter()
+        let notificationStateProvider = MockNotificationStateProvider(enabled: true)
+        let firstRetryObserved = expectation(description: "register task retained after transient failure")
+        let replayedRequestObserved = expectation(description: "register task replayed")
+        let successObserved = expectation(description: "register success")
+        let networkError = IterableError.general(description: "The Internet connection appears to be offline.")
+
+        let retryCallback = notificationCenter.addCallback(forNotification: .iterableTaskFinishedWithRetry) { _ in
+            firstRetryObserved.fulfill()
+        }
+        XCTAssertNotNil(retryCallback)
+
+        var registerAttemptCount = 0
+        let networkSession = MockNetworkSession(responseCallback: { _ in
+            registerAttemptCount += 1
+            if registerAttemptCount == 1 {
+                return MockNetworkSession.MockResponse(statusCode: 0,
+                                                       data: nil,
+                                                       error: networkError)
+            }
+
+            return MockNetworkSession.MockResponse()
+        })
+        networkSession.requestCallback = { request in
+            guard request.url?.absoluteString.contains(Const.Path.registerDeviceToken) == true else {
+                return
+            }
+
+            self.validateRegisterTokenRequest(request,
+                                              registerTokenInfo: registerTokenInfo,
+                                              notificationsEnabled: true)
+            if registerAttemptCount == 2 {
+                replayedRequestObserved.fulfill()
+            }
+        }
+
+        let requestHandler = createRequestHandler(networkSession: networkSession,
+                                                  notificationCenter: notificationCenter,
+                                                  selectOffline: true)
+        requestHandler.start()
+        requestHandler.register(registerTokenInfo: registerTokenInfo,
+                                notificationStateProvider: notificationStateProvider,
+                                onSuccess: { _ in successObserved.fulfill() },
+                                onFailure: { _, _ in XCTFail("register should retry and eventually succeed") })
+        notificationStateProvider.enabled = false
+
+        wait(for: [firstRetryObserved], timeout: testExpectationTimeout)
+        XCTAssertEqual(try persistenceContextProvider.mainQueueContext().findAllTasks().count, 1)
+
+        wait(for: [replayedRequestObserved, successObserved], timeout: testExpectationTimeout)
+        XCTAssertEqual(registerAttemptCount, 2)
+        XCTAssertEqual(try persistenceContextProvider.mainQueueContext().findAllTasks().count, 0)
+        requestHandler.stop()
+    }
+
+    func testOfflineRegisterTokenCapturesIdentityAtCallTime() throws {
+        let registerTokenInfo = createRegisterTokenInfo()
+        let originalUserId = "original-user-id"
+        let liveAuth = MutableAuthProvider(
+            initial: Auth(userId: originalUserId, email: nil, authToken: nil, userIdUnknownUser: nil)
+        )
+        let notificationStateProvider = DeferredNotificationStateProvider()
+        let bodyValidated = expectation(description: #function)
+
+        let networkSession = MockNetworkSession()
+        networkSession.requestCallback = { request in
+            guard request.url?.absoluteString.contains(Const.Path.registerDeviceToken) == true else {
+                return
+            }
+
+            self.validateRegisterTokenRequest(request,
+                                              registerTokenInfo: registerTokenInfo,
+                                              notificationsEnabled: true,
+                                              expectedEmail: nil,
+                                              expectedUserId: originalUserId,
+                                              expectedPreferUserId: true)
+            bodyValidated.fulfill()
+        }
+
+        let requestHandler = createRequestHandler(networkSession: networkSession,
+                                                  notificationCenter: MockNotificationCenter(),
+                                                  selectOffline: true,
+                                                  authProvider: liveAuth)
+
+        requestHandler.register(registerTokenInfo: registerTokenInfo,
+                                notificationStateProvider: notificationStateProvider,
+                                onSuccess: nil,
+                                onFailure: { reason, _ in XCTFail("register should not fail: \(reason ?? "nil")") })
+
+        liveAuth.currentAuth = Auth(userId: nil, email: nil, authToken: nil, userIdUnknownUser: nil)
+        notificationStateProvider.resolve(enabled: true)
+
+        waitForTaskRunner(requestHandler: requestHandler, expectation: bodyValidated)
+    }
+
+    func testOnlineFallbackRegisterTokenCapturesIdentityAtCallTime() throws {
+        let registerTokenInfo = createRegisterTokenInfo()
+        let originalEmail = "original@example.com"
+        let mutatedUserId = "mutated-user-id"
+        let liveAuth = MutableAuthProvider(
+            initial: Auth(userId: nil, email: originalEmail, authToken: nil, userIdUnknownUser: nil)
+        )
+        let notificationStateProvider = DeferredNotificationStateProvider()
+        let bodyValidated = expectation(description: #function)
+
+        let networkSession = MockNetworkSession()
+        networkSession.requestCallback = { request in
+            guard request.url?.absoluteString.contains(Const.Path.registerDeviceToken) == true else {
+                return
+            }
+
+            self.validateRegisterTokenRequest(request,
+                                              registerTokenInfo: registerTokenInfo,
+                                              notificationsEnabled: true,
+                                              expectedEmail: originalEmail,
+                                              expectedUserId: nil,
+                                              expectedPreferUserId: nil)
+            bodyValidated.fulfill()
+        }
+
+        let requestHandler = createRequestHandler(networkSession: networkSession,
+                                                  notificationCenter: MockNotificationCenter(),
+                                                  selectOffline: true,
+                                                  authProvider: liveAuth,
+                                                  maxTasks: 0)
+
+        requestHandler.register(registerTokenInfo: registerTokenInfo,
+                                notificationStateProvider: notificationStateProvider,
+                                onSuccess: nil,
+                                onFailure: { reason, _ in XCTFail("register should not fail: \(reason ?? "nil")") })
+
+        liveAuth.currentAuth = Auth(userId: mutatedUserId, email: nil, authToken: nil, userIdUnknownUser: nil)
+        notificationStateProvider.resolve(enabled: true)
+
+        wait(for: [bodyValidated], timeout: testExpectationTimeout)
     }
     
     func testDisableUserforCurrentUser() throws {
@@ -107,20 +287,216 @@ class RequestHandlerTests: XCTestCase {
         let bodyDict: [String: Any] = [
             "token": hexToken,
         ]
-        
+
         let expectations = createExpectations(description: #function)
-        
+
         let requestGenerator = { (requestHandler: RequestHandlerProtocol) in
             requestHandler.disableDeviceForAllUsers(hexToken: hexToken,
                                                     withOnSuccess: expectations.onSuccess,
                                                     onFailure: expectations.onFailure)
         }
-        
+
         try handleRequestWithSuccessAndFailure(requestGenerator: requestGenerator,
                                                 path: Const.Path.disableDevice,
                                                 bodyDict: bodyDict)
-        
+
         wait(for: [expectations.successExpectation, expectations.failureExpectation], timeout: testExpectationTimeout)
+    }
+
+    // Dedicated visibility test for the offline path on the all-users variant.
+    // `testDisableUserforAllUsers` above already exercises offline-success and
+    // offline-failure via `handleRequestWithSuccessAndFailure`, but the coverage
+    // isn't obvious from the test name. This one calls out the offline path
+    // explicitly so the regression is locked in.
+    func testOfflineDisableDeviceForAllUsersReplaysWithExpectedBody() throws {
+        let hexToken = "zee-token"
+        let bodyDict: [String: Any] = [
+            "token": hexToken,
+        ]
+
+        let requestGenerator = { (requestHandler: RequestHandlerProtocol) in
+            requestHandler.disableDeviceForAllUsers(hexToken: hexToken,
+                                                    withOnSuccess: nil,
+                                                    onFailure: nil)
+        }
+
+        handleOfflineRequestWithSuccess(requestGenerator: requestGenerator,
+                                        path: Const.Path.disableDevice,
+                                        bodyDict: bodyDict)
+    }
+
+    // Regression for SDK-297 P1: the offline queue must bake in the identity that was
+    // current at call time. `logoutPreviousUser()` (and `setEmail`/`setUserId`) clear
+    // `_email`/`_userId` synchronously after invoking `disableDeviceForCurrentUser`, so
+    // the replayed request would otherwise target the wrong user (or no user, collapsing
+    // into the all-users payload).
+    func testDisableDeviceForCurrentUserCapturesIdentityAtCallTime() throws {
+        let originalEmail = "original@example.com"
+        let mutatedEmail = "mutated@example.com"
+        let hexToken = "zee-token"
+        let expectedBody: [String: Any] = [
+            "token": hexToken,
+            "email": originalEmail,
+        ]
+
+        let mutableAuth = MutableAuthProvider(
+            initial: Auth(userId: nil, email: originalEmail, authToken: nil, userIdUnknownUser: nil)
+        )
+
+        let bodyValidated = expectation(description: #function)
+        let networkSession = MockNetworkSession()
+        networkSession.requestCallback = { request in
+            TestUtils.validate(request: request, apiEndPoint: Endpoint.api, path: Const.Path.disableDevice)
+            var requestBody = request.bodyDict
+            requestBody.removeValue(forKey: "createdAt")
+            XCTAssertTrue(TestUtils.areEqual(dict1: expectedBody, dict2: requestBody),
+                          "replayed body should carry the identity captured at call time, got \(requestBody)")
+            bodyValidated.fulfill()
+        }
+
+        let requestHandler = createRequestHandler(networkSession: networkSession,
+                                                  notificationCenter: MockNotificationCenter(),
+                                                  selectOffline: true,
+                                                  authProvider: mutableAuth)
+
+        requestHandler.disableDeviceForCurrentUser(hexToken: hexToken,
+                                                   withOnSuccess: nil,
+                                                   onFailure: nil)
+        // Simulate `logoutPreviousUser()` nulling identity immediately after the call.
+        mutableAuth.currentAuth = Auth(userId: nil, email: mutatedEmail, authToken: nil, userIdUnknownUser: nil)
+
+        waitForTaskRunner(requestHandler: requestHandler, expectation: bodyValidated)
+    }
+
+    // Regression for the fail-loud guard added in review: when no current user is
+    // set (auth is `.none`), `RequestHandler.disableDeviceForCurrentUser` must
+    // surface the error via `onFailure` instead of letting the request fall through
+    // to `setCurrentUser(inDict:)` and reading live auth at request-build time.
+    func testDisableDeviceForCurrentUserWithNoIdentityFailsLoudly() throws {
+        let emptyAuth = MutableAuthProvider(
+            initial: Auth(userId: nil, email: nil, authToken: nil, userIdUnknownUser: nil)
+        )
+
+        let onFailureCalled = expectation(description: "onFailure invoked")
+        var capturedReason: String?
+
+        let requestHandler = createRequestHandler(networkSession: MockNetworkSession(),
+                                                  notificationCenter: MockNotificationCenter(),
+                                                  selectOffline: true,
+                                                  authProvider: emptyAuth)
+
+        requestHandler.disableDeviceForCurrentUser(
+            hexToken: "zee-token",
+            withOnSuccess: { _ in
+                XCTFail("onSuccess must not fire when no current user is set")
+            },
+            onFailure: { reason, _ in
+                capturedReason = reason
+                onFailureCalled.fulfill()
+            }
+        )
+
+        wait(for: [onFailureCalled], timeout: testExpectationTimeout)
+        XCTAssertEqual(capturedReason,
+                       "disableDeviceForCurrentUser called without a current user identity")
+    }
+
+    // Regression for SDK-297 P2 round 2: when offline mode is enabled but
+    // `HealthMonitor.canSchedule()` returns false, `RequestHandler` falls back to the
+    // online processor. The caller-captured identity snapshot must still be honored by
+    // that fallback path so the request doesn't race live `auth` mutations.
+    func testOnlineDisableDeviceForCurrentUserHonorsIdentitySnapshot() throws {
+        let snapshotEmail = "captured@example.com"
+        let hexToken = "zee-token"
+        let expectedBody: [String: Any] = [
+            "token": hexToken,
+            "email": snapshotEmail,
+        ]
+
+        let bodyValidated = expectation(description: #function)
+        let networkSession = MockNetworkSession()
+        networkSession.requestCallback = { request in
+            TestUtils.validate(request: request, apiEndPoint: Endpoint.api, path: Const.Path.disableDevice)
+            var requestBody = request.bodyDict
+            requestBody.removeValue(forKey: "createdAt")
+            XCTAssertTrue(TestUtils.areEqual(dict1: expectedBody, dict2: requestBody),
+                          "online fallback body should use the snapshot, got \(requestBody)")
+            bodyValidated.fulfill()
+        }
+
+        // `self` (the test class) conforms to AuthProvider with email="user@example.com",
+        // so passing a *different* snapshot email proves the online path used the
+        // snapshot rather than live `auth`.
+        let onlineProcessor = OnlineRequestProcessor(apiKey: "zee-api-key",
+                                                     authProvider: self,
+                                                     authManager: nil,
+                                                     endpoint: Endpoint.api,
+                                                     networkSession: networkSession,
+                                                     deviceMetadata: Self.deviceMetadata,
+                                                     dateProvider: dateProvider)
+
+        onlineProcessor.disableDeviceForCurrentUser(hexToken: hexToken,
+                                                    identitySnapshot: .email(snapshotEmail),
+                                                    withOnSuccess: nil,
+                                                    onFailure: nil)
+
+        wait(for: [bodyValidated], timeout: testExpectationTimeout)
+    }
+
+    // Regression for SDK-297 P2: the offline disable-device task must carry the literal
+    // "disableDevice" request identifier so `RequestProcessorUtil.resetAuthRetries` skips
+    // this request class on success. If the identifier drifts (e.g. `#function`), a
+    // queued JWT 401 followed by a successful disable would incorrectly flip auth state
+    // back to "valid" and resume auth-paused tasks.
+    func testDisableDeviceForCurrentUserSuccessDoesNotResetAuthRetries() throws {
+        let hexToken = "zee-token"
+
+        let authManager = MockAuthManager()
+        // Simulate the state an offline queue is in after a prior JWT 401.
+        authManager.pauseAuthRetries = true
+        authManager.isLastAuthTokenValid = false
+        authManager.failedAuthCount = 3
+
+        let notificationCenter = MockNotificationCenter()
+        let networkSession = MockNetworkSession() // 200 OK
+        let healthMonitor = HealthMonitor(dataProvider: HealthMonitorDataProvider(maxTasks: 1000,
+                                                                                  persistenceContextProvider: persistenceContextProvider),
+                                          dateProvider: dateProvider,
+                                          networkSession: networkSession)
+        let taskScheduler = IterableTaskScheduler(persistenceContextProvider: persistenceContextProvider,
+                                                  notificationCenter: notificationCenter,
+                                                  healthMonitor: healthMonitor,
+                                                  dateProvider: dateProvider)
+        let taskRunner = IterableTaskRunner(networkSession: networkSession,
+                                            persistenceContextProvider: persistenceContextProvider,
+                                            healthMonitor: healthMonitor,
+                                            notificationCenter: notificationCenter,
+                                            timeInterval: 0.5,
+                                            dateProvider: dateProvider)
+        let offlineProcessor = OfflineRequestProcessor(apiKey: "zee-api-key",
+                                                       authProvider: self,
+                                                       authManager: authManager,
+                                                       endpoint: Endpoint.api,
+                                                       deviceMetadata: Self.deviceMetadata,
+                                                       taskScheduler: taskScheduler,
+                                                       taskRunner: taskRunner,
+                                                       notificationCenter: notificationCenter)
+
+        offlineProcessor.start()
+        let onSuccessCalled = expectation(description: "disableDevice onSuccess")
+        offlineProcessor.disableDeviceForCurrentUser(hexToken: hexToken,
+                                                     identitySnapshot: .email("user@example.com"),
+                                                     withOnSuccess: { _ in onSuccessCalled.fulfill() },
+                                                     onFailure: nil)
+
+        wait(for: [onSuccessCalled], timeout: testExpectationTimeout)
+        offlineProcessor.stop()
+
+        // Auth-pause state must be preserved — the "disableDevice" identifier opts
+        // out of the `resetAuthRetries` branch in RequestProcessorUtil.
+        XCTAssertTrue(authManager.pauseAuthRetries, "pauseAuthRetries must stay true after a disable-device success")
+        XCTAssertFalse(authManager.isLastAuthTokenValid, "isLastAuthTokenValid must stay false after a disable-device success")
+        XCTAssertEqual(authManager.failedAuthCount, 3, "failedAuthCount must not be reset by a disable-device success")
     }
     
     func testUpdateUser() throws {
@@ -678,7 +1054,7 @@ class RequestHandlerTests: XCTestCase {
         try persistenceContextProvider.mainQueueContext().save()
 
         internalApi.logoutUser()
-        
+
         let result = TestUtils.tryUntil(attempts: 10) {
             let count = try! persistenceContextProvider.mainQueueContext().findAllTasks().count
             return count == 0
@@ -818,7 +1194,8 @@ class RequestHandlerTests: XCTestCase {
         let remoteConfigurationData = """
         {
             "offlineMode": false,
-            "offlineModeBeta": false
+            "offlineModeBeta": false,
+            "autoRetry": false
         }
         """.data(using: .utf8)!
         var mapper = [String: Data?]()
@@ -851,7 +1228,8 @@ class RequestHandlerTests: XCTestCase {
         let remoteConfigurationData = """
         {
             "offlineMode": true,
-            "offlineModeBeta": true
+            "offlineModeBeta": true,
+            "autoRetry": true
         }
         """.data(using: .utf8)!
         var mapper = [String: Data?]()
@@ -864,9 +1242,43 @@ class RequestHandlerTests: XCTestCase {
         }
         let localStorage = MockLocalStorage()
         localStorage.email = "user@example.com"
+        localStorage.offlineMode = true // Set offline mode in localStorage too
         let internalAPI = InternalIterableAPI.initializeForTesting(networkSession: networkSession, localStorage: localStorage)
         wait(for: [expectation1], timeout: testExpectationTimeout)
 
+        // Wait for offline mode to be properly set
+        let offlineModeExpectation = expectation(description: "Wait for offline mode")
+        var retryCount = 0
+        let maxRetries = 5
+        
+        func checkOfflineMode() {
+            if retryCount >= maxRetries {
+                XCTFail("Failed to set offline mode after \(maxRetries) attempts")
+                offlineModeExpectation.fulfill()
+                return
+            }
+            
+            // Make a test track call to check processor type
+            networkSession.requestCallback = { request in
+                if request.url!.absoluteString.contains("track") {
+                    let processor = request.allHTTPHeaderFields?[JsonKey.Header.requestProcessor]!
+                    if processor == Const.ProcessorTypeName.offline {
+                        offlineModeExpectation.fulfill()
+                    } else {
+                        retryCount += 1
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            checkOfflineMode()
+                        }
+                    }
+                }
+            }
+            internalAPI.track("testEvent\(retryCount)")
+        }
+        
+        checkOfflineMode()
+        wait(for: [offlineModeExpectation], timeout: testExpectationTimeout)
+
+        // Now test the actual event tracking
         let expectation2 = expectation(description: #function)
         networkSession.requestCallback = { request in
             if request.url!.absoluteString.contains("track") {
@@ -935,7 +1347,63 @@ class RequestHandlerTests: XCTestCase {
         wait(for: [expectation2], timeout: testExpectationTimeout)
     }
 
-    
+    func testAutoRetryFlagParsedFromRemoteConfiguration() throws {
+        let expectation1 = expectation(description: "getRemoteConfiguration is called")
+        let remoteConfigurationData = """
+        {
+            "offlineMode": false,
+            "autoRetry": true
+        }
+        """.data(using: .utf8)!
+        var mapper = [String: Data?]()
+        mapper["getRemoteConfiguration"] = remoteConfigurationData
+        let networkSession = MockNetworkSession(statusCode: 200, urlPatternDataMapping: mapper)
+        networkSession.requestCallback = { request in
+            if request.url!.absoluteString.contains(Const.Path.getRemoteConfiguration) {
+                expectation1.fulfill()
+            }
+        }
+        let localStorage = MockLocalStorage()
+        localStorage.email = "user@example.com"
+        let internalAPI = InternalIterableAPI.initializeForTesting(networkSession: networkSession, localStorage: localStorage)
+        wait(for: [expectation1], timeout: testExpectationTimeout)
+
+        let autoRetryExpectation = expectation(description: "autoRetry is set")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertTrue(localStorage.autoRetry)
+            autoRetryExpectation.fulfill()
+        }
+        wait(for: [autoRetryExpectation], timeout: testExpectationTimeout)
+    }
+
+    func testAutoRetryDefaultsToFalseWhenMissingFromResponse() throws {
+        let expectation1 = expectation(description: "getRemoteConfiguration is called")
+        let remoteConfigurationData = """
+        {
+            "offlineMode": false
+        }
+        """.data(using: .utf8)!
+        var mapper = [String: Data?]()
+        mapper["getRemoteConfiguration"] = remoteConfigurationData
+        let networkSession = MockNetworkSession(statusCode: 200, urlPatternDataMapping: mapper)
+        networkSession.requestCallback = { request in
+            if request.url!.absoluteString.contains(Const.Path.getRemoteConfiguration) {
+                expectation1.fulfill()
+            }
+        }
+        let localStorage = MockLocalStorage()
+        localStorage.email = "user@example.com"
+        let internalAPI = InternalIterableAPI.initializeForTesting(networkSession: networkSession, localStorage: localStorage)
+        wait(for: [expectation1], timeout: testExpectationTimeout)
+
+        let autoRetryExpectation = expectation(description: "autoRetry defaults to false")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertFalse(localStorage.autoRetry)
+            autoRetryExpectation.fulfill()
+        }
+        wait(for: [autoRetryExpectation], timeout: testExpectationTimeout)
+    }
+
     private func handleRequestWithSuccessAndFailure(requestGenerator: (RequestHandlerProtocol) -> Pending<SendRequestValue, SendRequestError>,
                                                      path: String,
                                                      bodyDict: [AnyHashable: Any]) throws {
@@ -1048,8 +1516,11 @@ class RequestHandlerTests: XCTestCase {
     
     private func createRequestHandler(networkSession: NetworkSessionProtocol,
                                       notificationCenter: NotificationCenterProtocol,
-                                      selectOffline: Bool) -> RequestHandlerProtocol {
-        let healthMonitor = HealthMonitor(dataProvider: HealthMonitorDataProvider(maxTasks: 1000,
+                                      selectOffline: Bool,
+                                      authProvider: AuthProvider? = nil,
+                                      maxTasks: Int = 1000) -> RequestHandlerProtocol {
+        let resolvedAuthProvider: AuthProvider = authProvider ?? self
+        let healthMonitor = HealthMonitor(dataProvider: HealthMonitorDataProvider(maxTasks: maxTasks,
                                                                                   persistenceContextProvider: persistenceContextProvider),
                                           dateProvider: dateProvider,
                                           networkSession: networkSession)
@@ -1063,26 +1534,27 @@ class RequestHandlerTests: XCTestCase {
                                             notificationCenter: notificationCenter,
                                             timeInterval: 0.5,
                                             dateProvider: dateProvider)
-        
+
         let onlineProcessor = OnlineRequestProcessor(apiKey: "zee-api-key",
-                                                     authProvider: self,
+                                                     authProvider: resolvedAuthProvider,
                                                      authManager: nil,
                                                      endpoint: Endpoint.api,
                                                      networkSession: networkSession,
                                                      deviceMetadata: Self.deviceMetadata,
                                                      dateProvider: self.dateProvider)
         let offlineProcessor = OfflineRequestProcessor(apiKey: "zee-api-key",
-                                                       authProvider: self,
+                                                       authProvider: resolvedAuthProvider,
                                                        authManager: nil,
                                                        endpoint: Endpoint.api,
                                                        deviceMetadata: Self.deviceMetadata,
                                                        taskScheduler: taskScheduler,
                                                        taskRunner: taskRunner,
                                                        notificationCenter: notificationCenter)
-        
+
         return RequestHandler(onlineProcessor: onlineProcessor,
                               offlineProcessor: offlineProcessor,
                               healthMonitor: healthMonitor,
+                              authProvider: resolvedAuthProvider,
                               offlineMode: selectOffline)
     }
     
@@ -1129,6 +1601,72 @@ class RequestHandlerTests: XCTestCase {
         wait(for: [expectation], timeout: testExpectationTimeout)
         requestHandler.stop()
     }
+
+    private func createRegisterTokenInfo() -> RegisterTokenInfo {
+        RegisterTokenInfo(hexToken: "zee-token",
+                          appName: "zee-app-name",
+                          pushServicePlatform: .auto,
+                          apnsType: .sandbox,
+                          deviceId: "deviceId",
+                          deviceAttributes: [:],
+                          sdkVersion: "6.x.x",
+                          mobileFrameworkInfo: IterableAPIMobileFrameworkInfo(frameworkType: .native,
+                                                                              iterableSdkVersion: "6.x.x"))
+    }
+
+    private func validateRegisterTokenRequest(_ request: URLRequest,
+                                              registerTokenInfo: RegisterTokenInfo,
+                                              notificationsEnabled: Bool,
+                                              expectedEmail: String? = "user@example.com",
+                                              expectedUserId: String? = nil,
+                                              expectedPreferUserId: Bool? = nil,
+                                              file: StaticString = #filePath,
+                                              line: UInt = #line) {
+        TestUtils.validate(request: request,
+                           apiEndPoint: Endpoint.api,
+                           path: Const.Path.registerDeviceToken)
+
+        let requestBody = request.bodyDict
+        XCTAssertEqual(requestBody[JsonKey.email] as? String, expectedEmail, file: file, line: line)
+        XCTAssertEqual(requestBody[JsonKey.userId] as? String, expectedUserId, file: file, line: line)
+        XCTAssertEqual(requestBody[JsonKey.preferUserId] as? Bool, expectedPreferUserId, file: file, line: line)
+
+        guard let device = requestBody[JsonKey.device] as? [String: Any] else {
+            XCTFail("missing device dictionary", file: file, line: line)
+            return
+        }
+
+        XCTAssertEqual(device[JsonKey.token] as? String,
+                       registerTokenInfo.hexToken,
+                       file: file,
+                       line: line)
+        XCTAssertEqual(device[JsonKey.applicationName] as? String,
+                       registerTokenInfo.appName,
+                       file: file,
+                       line: line)
+        XCTAssertEqual(device[JsonKey.platform] as? String,
+                       "APNS_SANDBOX",
+                       file: file,
+                       line: line)
+
+        guard let dataFields = device[JsonKey.dataFields] as? [String: Any] else {
+            XCTFail("missing dataFields dictionary", file: file, line: line)
+            return
+        }
+
+        XCTAssertEqual(dataFields[JsonKey.deviceId] as? String,
+                       registerTokenInfo.deviceId,
+                       file: file,
+                       line: line)
+        XCTAssertEqual(dataFields[JsonKey.iterableSdkVersion] as? String,
+                       registerTokenInfo.sdkVersion,
+                       file: file,
+                       line: line)
+        XCTAssertEqual(dataFields[JsonKey.notificationsEnabled] as? Bool,
+                       notificationsEnabled,
+                       file: file,
+                       line: line)
+    }
     
     struct Exp {
         let successExpectation: XCTestExpectation
@@ -1174,11 +1712,54 @@ class RequestHandlerTests: XCTestCase {
         let provider = CoreDataPersistenceContextProvider(dateProvider: dateProvider)!
         return provider
     }()
+
+    func testOfflineProcessor_callsOnFailure_whenJwt401AndAuthRetryExhausted() throws {
+        let onFailureCalled = expectation(description: "onFailure invoked via onRetryExhausted")
+
+        let jwtErrorData = ["code": JsonValue.Code.invalidJwtPayload].toJsonData()
+        let networkSession = MockNetworkSession(statusCode: 401, data: jwtErrorData)
+        let notificationCenter = MockNotificationCenter()
+        let authManager = MockAuthManager()
+        authManager.shouldRetry = false  // forces onRetryExhausted path in scheduleAuthTokenRefreshTimer
+
+        let healthMonitor = HealthMonitor(dataProvider: HealthMonitorDataProvider(maxTasks: 1000,
+                                                                                  persistenceContextProvider: persistenceContextProvider),
+                                          dateProvider: dateProvider,
+                                          networkSession: networkSession)
+        let taskScheduler = IterableTaskScheduler(persistenceContextProvider: persistenceContextProvider,
+                                                  notificationCenter: notificationCenter,
+                                                  healthMonitor: healthMonitor,
+                                                  dateProvider: dateProvider)
+        let taskRunner = IterableTaskRunner(networkSession: networkSession,
+                                            persistenceContextProvider: persistenceContextProvider,
+                                            healthMonitor: healthMonitor,
+                                            notificationCenter: notificationCenter,
+                                            timeInterval: 0.5,
+                                            dateProvider: dateProvider)
+
+        let offlineProcessor = OfflineRequestProcessor(apiKey: "zee-api-key",
+                                                       authProvider: self,
+                                                       authManager: authManager,
+                                                       endpoint: Endpoint.api,
+                                                       deviceMetadata: Self.deviceMetadata,
+                                                       taskScheduler: taskScheduler,
+                                                       taskRunner: taskRunner,
+                                                       notificationCenter: notificationCenter)
+
+        offlineProcessor.start()
+        offlineProcessor.updateCart(items: [CommerceItem(id: "id-1", name: "name-1", price: 1, quantity: 1)],
+                                    onSuccess: nil,
+                                    onFailure: { _, _ in onFailureCalled.fulfill() })
+
+        wait(for: [onFailureCalled], timeout: testExpectationTimeout)
+        XCTAssertTrue(authManager.handleAuthFailureCalled)
+        offlineProcessor.stop()
+    }
 }
 
 extension RequestHandlerTests: AuthProvider {
     var auth: Auth {
-        Auth(userId: nil, email: "user@example.com", authToken: nil)
+        Auth(userId: nil, email: "user@example.com", authToken: nil, userIdUnknownUser: nil)
     }
 }
 
@@ -1191,5 +1772,26 @@ fileprivate extension MockNetworkSession {
                                             error: nil)
         }
         self.init(mapping: mapping)
+    }
+}
+
+fileprivate final class MutableAuthProvider: AuthProvider {
+    var currentAuth: Auth
+    init(initial: Auth) { currentAuth = initial }
+    var auth: Auth { currentAuth }
+}
+
+fileprivate final class DeferredNotificationStateProvider: NotificationStateProviderProtocol {
+    private var callback: ((Bool) -> Void)?
+
+    func isNotificationsEnabled(withCallback callback: @escaping (Bool) -> Void) {
+        self.callback = callback
+    }
+
+    func registerForRemoteNotifications() {}
+
+    func resolve(enabled: Bool) {
+        callback?(enabled)
+        callback = nil
     }
 }

@@ -7,6 +7,15 @@ import Foundation
 @testable import IterableSDK
 
 class MockLocalStorage: LocalStorageProtocol {
+
+    var userIdUnknownUser: String?
+    
+    var unknownUserEvents: [[AnyHashable : Any]]?
+    
+    var criteriaData: Data?
+    
+    var unknownUserSessions: IterableSDK.IterableUnknownUserSessionsWrapper?
+    
     var userId: String? = nil
     
     var email: String? = nil
@@ -20,10 +29,31 @@ class MockLocalStorage: LocalStorageProtocol {
     var sdkVersion: String? = nil
     
     var offlineMode: Bool = false
+
+    var autoRetry: Bool = false
+
+    var visitorUsageTracked: Bool = true
     
+    var visitorConsentTimestamp: Int64?
+    
+    var unknownUserUpdate: [AnyHashable : Any]?
+
     var isNotificationsEnabled: Bool = false
     
     var hasStoredNotificationSetting: Bool = false
+
+    var jsonOnlyMessageQueueData: Data? {
+        get {
+            onJsonOnlyMessageQueueDataRead?()
+            return storedJsonOnlyMessageQueueData
+        }
+        set {
+            storedJsonOnlyMessageQueueData = newValue
+            jsonOnlyMessageQueueDataWriteCount += 1
+        }
+    }
+    var onJsonOnlyMessageQueueDataRead: (() -> Void)?
+    private(set) var jsonOnlyMessageQueueDataWriteCount = 0
     
     func getAttributionInfo(currentDate: Date) -> IterableAttributionInfo? {
         guard !MockLocalStorage.isExpired(expiration: attributionInfoExpiration, currentDate: currentDate) else {
@@ -39,6 +69,7 @@ class MockLocalStorage: LocalStorageProtocol {
     
     private var attributionInfo: IterableAttributionInfo? = nil
     private var attributionInfoExpiration: Date? = nil
+    private var storedJsonOnlyMessageQueueData: Data?
     
     private static func isExpired(expiration: Date?, currentDate: Date) -> Bool {
         guard let expiration = expiration else {

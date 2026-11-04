@@ -14,6 +14,7 @@ struct RegisterTokenInfo {
     let deviceAttributes: [String: String]
     let sdkVersion: String?
     let mobileFrameworkInfo: IterableAPIMobileFrameworkInfo
+    var auth: Auth? = nil
 }
 
 struct UpdateSubscriptionsInfo {
@@ -25,10 +26,38 @@ struct UpdateSubscriptionsInfo {
     let templateId: NSNumber?
 }
 
+enum RequestIdentifier {
+    static let disableDevice = "disableDevice"
+    static let registerToken = "registerToken"
+}
+
 /// `RequestHandler` will delegate network related calls to this protocol.
 protocol RequestProcessorProtocol {
     @discardableResult
+    func register(registerTokenInfo: RegisterTokenInfo,
+                  notificationsEnabled: Bool,
+                  onSuccess: OnSuccessHandler?,
+                  onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+
+    @discardableResult
+    func disableDeviceForCurrentUser(hexToken: String,
+                                     identitySnapshot: UserIdentitySnapshot?,
+                                     withOnSuccess onSuccess: OnSuccessHandler?,
+                                     onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+
+    @discardableResult
+    func disableDeviceForAllUsers(hexToken: String,
+                                  withOnSuccess onSuccess: OnSuccessHandler?,
+                                  onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+
+    @discardableResult
     func updateCart(items: [CommerceItem],
+                    onSuccess: OnSuccessHandler?,
+                    onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+    
+    @discardableResult
+    func updateCart(items: [CommerceItem],
+                    createdAt: Int,
                     onSuccess: OnSuccessHandler?,
                     onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     
@@ -38,6 +67,14 @@ protocol RequestProcessorProtocol {
                        dataFields: [AnyHashable: Any]?,
                        campaignId: NSNumber?,
                        templateId: NSNumber?,
+                       onSuccess: OnSuccessHandler?,
+                       onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+    
+    @discardableResult
+    func trackPurchase(_ total: NSNumber,
+                       items: [CommerceItem],
+                       dataFields: [AnyHashable: Any]?,
+                       createdAt: Int,
                        onSuccess: OnSuccessHandler?,
                        onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     
@@ -53,6 +90,12 @@ protocol RequestProcessorProtocol {
     @discardableResult
     func track(event: String,
                dataFields: [AnyHashable: Any]?,
+               onSuccess: OnSuccessHandler?,
+               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+    
+    @discardableResult
+    func track(event: String,
+               withBody body: [AnyHashable: Any]?,
                onSuccess: OnSuccessHandler?,
                onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     
@@ -109,16 +152,6 @@ protocol RequestProcessorProtocol {
     
     @discardableResult
     func track(embeddedMessageClick message: IterableEmbeddedMessage, buttonIdentifier: String?, clickedUrl: String,
-               onSuccess: OnSuccessHandler?,
-               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
-    
-    @discardableResult
-    func track(embeddedMessageDismiss message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler?,
-               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
-    
-    @discardableResult
-    func track(embeddedMessageImpression message: IterableEmbeddedMessage,
                onSuccess: OnSuccessHandler?,
                onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     

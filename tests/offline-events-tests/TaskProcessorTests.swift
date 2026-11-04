@@ -14,7 +14,7 @@ class TaskProcessorTests: XCTestCase {
         let dataFields = ["var1": "val1", "var2": "val2"]
         
         let expectation1 = expectation(description: #function)
-        let auth = Auth(userId: nil, email: email, authToken: nil)
+        let auth = Auth(userId: nil, email: email, authToken: nil, userIdUnknownUser: nil)
         let config = IterableConfig()
         let networkSession = MockNetworkSession()
         let internalAPI = InternalIterableAPI.initializeForTesting(apiKey: apiKey, config: config, networkSession: networkSession)
@@ -88,6 +88,29 @@ class TaskProcessorTests: XCTestCase {
         wait(for: [expectation1], timeout: 15.0)
     }
 
+    func testUsesCurrentAuthTokenWhenProcessingPersistedTask() throws {
+        let persistedToken = "token-a"
+        let currentToken = "token-b"
+        let task = try createSampleTask(authToken: persistedToken)!
+        let authManager = MockAuthManager()
+        authManager.token = currentToken
+
+        let requestExpectation = expectation(description: #function)
+        let networkSession = MockNetworkSession(statusCode: 200)
+        networkSession.requestCallback = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: JsonKey.Header.authorization), "Bearer \(currentToken)")
+            requestExpectation.fulfill()
+        }
+
+        let processor = IterableAPICallTaskProcessor(networkSession: networkSession,
+                                                     authManager: authManager)
+        try processor.process(task: task)
+
+        wait(for: [requestExpectation], timeout: 5.0)
+        try persistenceProvider.mainQueueContext().delete(task: task)
+        try persistenceProvider.mainQueueContext().save()
+    }
+
     func testNetworkUnavailable() throws {
         let expectation1 = expectation(description: #function)
         let task = try createSampleTask()!
@@ -143,6 +166,97 @@ class TaskProcessorTests: XCTestCase {
         wait(for: [expectation1], timeout: 15.0)
     }
     
+    // MARK: - SDK-349 Error Classification Tests
+
+    func test5xxErrorIsTransient() throws {
+        let expectation1 = expectation(description: #function)
+        let task = try createSampleTask()!
+
+        let networkSession = MockNetworkSession(statusCode: 500, data: nil, error: nil)
+        let processor = IterableAPICallTaskProcessor(networkSession: networkSession)
+        try processor.process(task: task)
+            .onSuccess { taskResult in
+                switch taskResult {
+                case .failureWithRetry(retryAfter: _, detail: _):
+                    expectation1.fulfill()
+                default:
+                    XCTFail("Expected failureWithRetry for 5xx, got \(taskResult)")
+                }
+            }
+            .onError { _ in XCTFail() }
+
+        try persistenceProvider.mainQueueContext().delete(task: task)
+        try persistenceProvider.mainQueueContext().save()
+        wait(for: [expectation1], timeout: 15.0)
+    }
+
+    func test4xxErrorIsPermanent() throws {
+        let expectation1 = expectation(description: #function)
+        let task = try createSampleTask()!
+
+        let networkSession = MockNetworkSession(statusCode: 400, data: nil, error: nil)
+        let processor = IterableAPICallTaskProcessor(networkSession: networkSession)
+        try processor.process(task: task)
+            .onSuccess { taskResult in
+                switch taskResult {
+                case .failureWithNoRetry(detail: _):
+                    expectation1.fulfill()
+                default:
+                    XCTFail("Expected failureWithNoRetry for 4xx, got \(taskResult)")
+                }
+            }
+            .onError { _ in XCTFail() }
+
+        try persistenceProvider.mainQueueContext().delete(task: task)
+        try persistenceProvider.mainQueueContext().save()
+        wait(for: [expectation1], timeout: 15.0)
+    }
+
+    func test429RateLimitIsTransient() throws {
+        let expectation1 = expectation(description: #function)
+        let task = try createSampleTask()!
+
+        let networkSession = MockNetworkSession(statusCode: 429, data: nil, error: nil)
+        let processor = IterableAPICallTaskProcessor(networkSession: networkSession)
+        try processor.process(task: task)
+            .onSuccess { taskResult in
+                switch taskResult {
+                case .failureWithRetry(retryAfter: _, detail: _):
+                    expectation1.fulfill()
+                default:
+                    XCTFail("Expected failureWithRetry for 429, got \(taskResult)")
+                }
+            }
+            .onError { _ in XCTFail() }
+
+        try persistenceProvider.mainQueueContext().delete(task: task)
+        try persistenceProvider.mainQueueContext().save()
+        wait(for: [expectation1], timeout: 15.0)
+    }
+
+    func testTimeoutErrorIsTransient() throws {
+        let expectation1 = expectation(description: #function)
+        let task = try createSampleTask()!
+
+        let networkError = IterableError.general(description: "The request timed out.")
+        let networkSession = MockNetworkSession(statusCode: 0, data: nil, error: networkError)
+        let processor = IterableAPICallTaskProcessor(networkSession: networkSession)
+        try processor.process(task: task)
+            .onSuccess { taskResult in
+                switch taskResult {
+                case .failureWithRetry(retryAfter: _, detail: _):
+                    expectation1.fulfill()
+                default:
+                    XCTFail("Expected failureWithRetry for timeout, got \(taskResult)")
+                }
+            }
+            .onError { _ in XCTFail() }
+
+        try persistenceProvider.mainQueueContext().delete(task: task)
+        try persistenceProvider.mainQueueContext().save()
+        wait(for: [expectation1], timeout: 15.0)
+    }
+
     func testSentAtInHeader() throws {
         let expectation1 = expectation(description: #function)
         let task = try createSampleTask()!
@@ -215,13 +329,15 @@ class TaskProcessorTests: XCTestCase {
         wait(for: [expectation1], timeout: 5.0)
     }
 
-    private func createSampleTask(scheduledAt: Date = Date(), requestedAt: Date = Date()) throws -> IterableTask? {
+    private func createSampleTask(scheduledAt: Date = Date(),
+                                  requestedAt: Date = Date(),
+                                  authToken: String? = nil) throws -> IterableTask? {
         let apiKey = "test-api-key"
         let email = "user@example.com"
         let eventName = "CustomEvent1"
         let dataFields = ["var1": "val1", "var2": "val2"]
         
-        let auth = Auth(userId: nil, email: email, authToken: nil)
+        let auth = Auth(userId: nil, email: email, authToken: nil, userIdUnknownUser: nil)
         let requestCreator = RequestCreator(auth: auth,
                                             deviceMetadata: deviceMetadata)
         guard case let Result.success(trackEventRequest) = requestCreator.createTrackEventRequest(eventName, dataFields: dataFields) else {
@@ -231,7 +347,7 @@ class TaskProcessorTests: XCTestCase {
         
         let apiCallRequest = IterableAPICallRequest(apiKey: apiKey,
                                                     endpoint: Endpoint.api,
-                                                    authToken: auth.authToken,
+                                                    authToken: authToken,
                                                     deviceMetadata: deviceMetadata,
                                                     iterableRequest: trackEventRequest)
         let data = try JSONEncoder().encode(apiCallRequest)

@@ -1,0 +1,530 @@
+//
+//  AppDelegate.swift
+//  swift-sample-app
+//
+//  Created by Tapash Majumder on 6/13/18.
+//  Copyright © 2018 Iterable. All rights reserved.
+//
+
+import UIKit
+import UserNotifications
+
+import IterableSDK
+
+@UIApplicationMain
+class AppDelegate: UIResponder, UIApplicationDelegate {
+    var window: UIWindow?
+    
+    // MARK: - AppDelegate Lifecycle
+    
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // Create window and set root to HomeViewController programmatically for a clean test UI
+        window = UIWindow(frame: UIScreen.main.bounds)
+        let root = UINavigationController(rootViewController: HomeViewController())
+        window?.rootViewController = root
+        window?.makeKeyAndVisible()
+
+        LogStore.shared.log("🚀 App started")
+
+        setupNotifications()
+        setupTestModeUI()
+
+        // Restore saved config overrides BEFORE SDK init so getRemoteConfiguration is intercepted
+        _ = ConfigOverrideManager.shared
+
+        // Start network monitoring
+        NetworkMonitor.shared.startMonitoring()
+        
+        // Reset device token session state on app launch for clean testing
+        AppDelegate.resetDeviceTokenSessionState()
+        
+        // CRITICAL: Initialize SDK early if app is opened via universal link
+        // This ensures SDK is ready to handle the deep link when continue userActivity is called
+        if let userActivity = launchOptions?[.userActivityDictionary] as? [String: Any],
+           let activity = userActivity["UIApplicationLaunchOptionsUserActivityKey"] as? NSUserActivity,
+           activity.activityType == NSUserActivityTypeBrowsingWeb {
+            print("🔗 [APP] App launched via universal link - initializing SDK early")
+            print("🔗 [APP] Launch options: \(launchOptions ?? [:])")
+            print("🔗 [APP] User activity: \(activity)")
+            if let webpageURL = activity.webpageURL {
+                print("🔗 [APP] Webpage URL: \(webpageURL.absoluteString)")
+            }
+            
+            AppDelegate.initializeIterableSDK()
+            print("✅ [APP] SDK initialization complete")
+            
+            // Also register test user email
+            if let testEmail = AppDelegate.loadTestUserEmailFromConfig() {
+                print("📧 [APP] Registering test email: \(testEmail)")
+                AppDelegate.registerEmailToIterableSDK(email: testEmail)
+                print("✅ [APP] SDK initialized and user registered for deep link handling")
+                print("✅ [APP] IterableAPI.email is now: \(IterableAPI.email ?? "nil")")
+            } else {
+                print("⚠️ [APP] Could not load test email from config")
+            }
+        }
+
+        return true
+    }
+    
+    func applicationWillResignActive(_: UIApplication) {
+        // Sent when the application is about to move from active to inactive state. This can occur for certain types of temporary interruptions (such as an incoming phone call or SMS message) or when the user quits the application and it begins the transition to the background state.
+        // Use this method to pause ongoing tasks, disable timers, and invalidate graphics rendering callbacks. Games should use this method to pause the game.
+    }
+    
+    func applicationDidEnterBackground(_: UIApplication) {
+        // Use this method to release shared resources, save user data, invalidate timers, and store enough application state information to restore your application to its current state in case it is terminated later.
+        // If your application supports background execution, this method is called instead of applicationWillTerminate: when the user quits.
+    }
+    
+    func applicationWillEnterForeground(_: UIApplication) {
+        // Called as part of the transition from the background to the active state; here you can undo many of the changes made on entering the background.
+    }
+    
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        print("🚀 BREAKPOINT HERE: App became active")
+        // Set a breakpoint here to confirm app is opening
+        
+        // App is always in test mode - no validation needed
+    }
+    
+    func applicationWillTerminate(_: UIApplication) {
+        // Called when the application is about to terminate. Save data if appropriate. See also applicationDidEnterBackground:.
+    }
+    
+    // MARK: - Silent Push for in-app
+    
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        print("🔕 [APP] Silent push notification received")
+        print("🔕 [APP] Silent push payload: \(userInfo)")
+        
+        // Log Iterable-specific data if present
+        if let iterableData = userInfo["itbl"] as? [String: Any] {
+            print("🔕 [APP] Iterable-specific data in silent push: \(iterableData)")
+            
+            if let isGhostPush = iterableData["isGhostPush"] as? Bool {
+                print("👻 [APP] Ghost push flag: \(isGhostPush)")
+            }
+            
+            if let notificationType = iterableData["notificationType"] as? String {
+                print("📝 [APP] Notification type: \(notificationType)")
+            }
+        }
+        
+        // Pass to Iterable SDK for processing
+        // This enables automatic embedded message sync when silent push with "UpdateEmbedded" type is received
+        print("📲 [APP] Passing silent push to Iterable SDK for processing...")
+        IterableAppIntegration.application(application, didReceiveRemoteNotification: userInfo, fetchCompletionHandler: completionHandler)
+    }
+    
+    // MARK: - Deep link (Universal Links)
+    
+    func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+        print("🔗 [APP] Universal link received via NSUserActivity")
+        print("🔗 [APP] Activity type: \(userActivity.activityType)")
+        print("🔗 [APP] Current IterableAPI.email: \(IterableAPI.email ?? "nil")")
+        print("🔗 [APP] Is SDK initialized: \(IterableAPI.email != nil)")
+        
+        // Handle universal links (e.g., from Reminders, Notes, Safari, etc.)
+        if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+           let url = userActivity.webpageURL {
+            print("🔗 [APP] Universal link URL: \(url.absoluteString)")
+            print("🔗 [APP] URL host: \(url.host ?? "nil")")
+            print("🔗 [APP] URL path: \(url.path)")
+            
+            // Initialize SDK if not already initialized
+            if IterableAPI.email == nil {
+                print("🔗 [APP] SDK not initialized - initializing now for universal link handling")
+                AppDelegate.initializeIterableSDK()
+                
+                if let testEmail = AppDelegate.loadTestUserEmailFromConfig() {
+                    print("📧 [APP] Registering test email: \(testEmail)")
+                    AppDelegate.registerEmailToIterableSDK(email: testEmail)
+                    print("✅ [APP] SDK initialized and user registered for deep link handling")
+                    print("✅ [APP] IterableAPI.email is now: \(IterableAPI.email ?? "nil")")
+                } else {
+                    print("⚠️ [APP] Could not load test email from config")
+                }
+            }
+            
+            // Pass to Iterable SDK for unwrapping and handling
+            // The SDK will unwrap /a/ links and call the URL delegate with the destination URL
+            print("🔗 [APP] About to call IterableAPI.handle(universalLink:)")
+            let result = IterableAPI.handle(universalLink: url)
+            print("🔗 [APP] IterableAPI.handle(universalLink:) returned: \(result)")
+            return true
+        }
+        
+        print("⚠️ [APP] Universal link not handled - activity type mismatch")
+        return false
+    }
+    
+    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
+        print("🔗 App opened via direct deep link: \(url.absoluteString)")
+        
+        if url.scheme == "tester" {
+            print("✅ Direct deep link opened - tester:// (will be handled by Iterable SDK)")
+            return true
+        }
+        
+        return false
+    }
+    
+    // MARK: - Notifications
+    
+    func application(_ applicatiTon: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        print("Received device token: \(deviceToken.map { String(format: "%02.2hhx", $0) }.joined())")
+        AppDelegate.registerDeviceToken(deviceToken)
+    }
+    
+    func application(_: UIApplication, didFailToRegisterForRemoteNotificationsWithError _: Error) {}
+    
+    // ITBL:
+    // Setup self as delegate to listen to push notifications.
+    // Note: This only sets up the delegate, doesn't request permissions automatically
+    private func setupNotifications() {
+        print("🔔 Setting up notification delegate")
+        UNUserNotificationCenter.current().delegate = self
+        print("🔔 Notification delegate set to: \(String(describing: UNUserNotificationCenter.current().delegate))")
+    }
+    
+    // MARK: - Helper Functions
+    private func setupTestModeUI() {
+        // Add visual indicator that we're always in integration test mode
+        DispatchQueue.main.async {
+            if let window = self.window {
+                let testBanner = UIView()
+                testBanner.backgroundColor = UIColor.systemYellow
+                testBanner.translatesAutoresizingMaskIntoConstraints = false
+
+                let testLabel = UILabel()
+                testLabel.text = "🧪 INTEGRATION TEST APP 🧪"
+                testLabel.textAlignment = .center
+                testLabel.font = UIFont.systemFont(ofSize: 12, weight: .bold)
+                testLabel.translatesAutoresizingMaskIntoConstraints = false
+                testLabel.accessibilityIdentifier = "app-ready-indicator"
+
+                let networkButton = UIButton(type: .system)
+                networkButton.setTitle("📡 Network", for: .normal)
+                networkButton.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+                networkButton.backgroundColor = UIColor.systemBlue
+                networkButton.setTitleColor(.white, for: .normal)
+                networkButton.layer.cornerRadius = 8
+                networkButton.translatesAutoresizingMaskIntoConstraints = false
+                networkButton.accessibilityIdentifier = "network-monitor-button"
+                networkButton.addTarget(self, action: #selector(self.showNetworkMonitor), for: .touchUpInside)
+
+                let backendButton = UIButton(type: .system)
+                backendButton.setTitle("⚙️ Backend", for: .normal)
+                backendButton.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+                backendButton.backgroundColor = UIColor.systemPurple
+                backendButton.setTitleColor(.white, for: .normal)
+                backendButton.layer.cornerRadius = 8
+                backendButton.translatesAutoresizingMaskIntoConstraints = false
+                backendButton.accessibilityIdentifier = "backend-tab"
+                backendButton.addTarget(self, action: #selector(self.showBackendStatus), for: .touchUpInside)
+
+                testBanner.addSubview(testLabel)
+                testBanner.addSubview(networkButton)
+                testBanner.addSubview(backendButton)
+                window.addSubview(testBanner)
+
+                NSLayoutConstraint.activate([
+                    testBanner.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor),
+                    testBanner.leadingAnchor.constraint(equalTo: window.leadingAnchor),
+                    testBanner.trailingAnchor.constraint(equalTo: window.trailingAnchor),
+                    testBanner.heightAnchor.constraint(equalToConstant: 40),
+
+                    testLabel.centerXAnchor.constraint(equalTo: testBanner.centerXAnchor),
+                    testLabel.centerYAnchor.constraint(equalTo: testBanner.centerYAnchor),
+
+                    networkButton.trailingAnchor.constraint(equalTo: testBanner.trailingAnchor, constant: -20),
+                    networkButton.centerYAnchor.constraint(equalTo: testBanner.centerYAnchor),
+                    networkButton.widthAnchor.constraint(equalToConstant: 100),
+                    networkButton.heightAnchor.constraint(equalToConstant: 28),
+                    
+                    backendButton.leadingAnchor.constraint(equalTo: testBanner.leadingAnchor, constant: 20),
+                    backendButton.centerYAnchor.constraint(equalTo: testBanner.centerYAnchor),
+                    backendButton.widthAnchor.constraint(equalToConstant: 100),
+                    backendButton.heightAnchor.constraint(equalToConstant: 28)
+                ])
+
+                window.bringSubviewToFront(testBanner)
+            }
+        }
+    }
+    
+    private func presentFromRoot(_ viewControllerToPresent: UIViewController) {
+        guard let rootVC = window?.rootViewController else { return }
+        // If something is already presented, dismiss it first (no animation)
+        // so we always present cleanly from the root navigation controller.
+        if let presented = rootVC.presentedViewController {
+            presented.dismiss(animated: false) {
+                rootVC.present(viewControllerToPresent, animated: true)
+            }
+        } else {
+            rootVC.present(viewControllerToPresent, animated: true)
+        }
+    }
+
+    @objc private func showNetworkMonitor() {
+        let networkMonitorVC = NetworkMonitorViewController()
+        let navController = UINavigationController(rootViewController: networkMonitorVC)
+        navController.modalPresentationStyle = .fullScreen
+        presentFromRoot(navController)
+    }
+
+    @objc private func showBackendStatus() {
+        let backendStatusVC = BackendStatusViewController()
+        let navController = UINavigationController(rootViewController: backendStatusVC)
+        navController.modalPresentationStyle = .fullScreen
+        presentFromRoot(navController)
+    }
+    
+    private func showAlert(with title: String, and message: String) {
+        guard let rootViewController = window?.rootViewController else { return }
+        
+        let alert = UIAlertController(
+            title: title,
+            message: message,
+            preferredStyle: .alert
+        )
+        
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        
+        // Find the topmost presented view controller
+        var topViewController = rootViewController
+        while let presentedViewController = topViewController.presentedViewController {
+            topViewController = presentedViewController
+        }
+        
+        topViewController.present(alert, animated: true)
+    }
+    
+    private func showSilentPushAlert(badgeCount: Int, contentAvailable: Int = 0) {
+        showAlert(with: "Silent Push Received", and: "🔕 Silent push has been received with a badge count of \(badgeCount) and content-available: \(contentAvailable)")
+    }
+    
+    private func showDeepLinkAlert(url: URL) {
+        showAlert(with: "Iterable Deep Link Opened", and: "🔗 App was opened via Iterable SDK deep link:\n\(url.absoluteString)")
+    }
+    
+    private func navigateToUpdateScreen(url: URL) {
+        guard let rootViewController = window?.rootViewController else {
+            print("❌ Could not get root view controller")
+            return
+        }
+        
+        // Create the update view controller with the path
+        let updateVC = UpdateViewController(path: url.path)
+        updateVC.modalPresentationStyle = .fullScreen
+        
+        // Find the topmost presented view controller
+        var topViewController = rootViewController
+        while let presentedViewController = topViewController.presentedViewController {
+            topViewController = presentedViewController
+        }
+        
+        print("✅ Presenting UpdateViewController for path: \(url.path)")
+        topViewController.present(updateVC, animated: true) {
+            print("✅ UpdateViewController presented successfully")
+        }
+    }
+}
+
+// MARK: - UNUserNotificationCenterDelegate
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    public func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        print("🔔 [APP] Push notification received while app is in foreground")
+        print("🔔 [APP] Notification payload: \(notification.request.content.userInfo)")
+        print("🔔 [APP] Notification title: \(notification.request.content.title)")
+        print("🔔 [APP] Notification body: \(notification.request.content.body)")
+        
+        if let iterableData = notification.request.content.userInfo["itbl"] as? [String: Any] {
+            print("🔔 [APP] Iterable-specific data: \(iterableData)")
+            
+            // Check if this is a silent push for embedded messages
+            if let notificationType = iterableData["notificationType"] as? String {
+                print("📝 [APP] Notification type: \(notificationType)")
+                if notificationType == "UpdateEmbedded" {
+                    print("🎯 [APP] Silent push for embedded messages detected in FOREGROUND")
+                    print("💡 [APP] Passing to SDK for embedded message sync...")
+                    
+                    // Pass to SDK even when in foreground
+                    IterableAppIntegration.application(
+                        UIApplication.shared,
+                        didReceiveRemoteNotification: notification.request.content.userInfo,
+                        fetchCompletionHandler: { _ in }
+                    )
+                }
+            }
+        }
+        
+        print("🔔 Foreground notification received: \(notification.request.content.userInfo)")
+        
+        // Check if this is from our silent push campaign
+        let itbl = notification.request.content.userInfo["itbl"] as? [String: Any]
+        if let campaignId = itbl?["campaignId"] as? Int,
+           campaignId == BCITCampaign.silentPush {
+            print("🔕 Silent push campaign detected in foreground - treating as silent")
+            
+            // Extract badge count and content-available flag, then show our custom alert
+        // For all other notifications, show normally
+            let aps = notification.request.content.userInfo["aps"] as? [String: Any]
+            let badgeCount = aps?["badge"] as? Int ?? 0
+            let contentAvailable = aps?["content-available"] as? Int ?? 0
+            
+            DispatchQueue.main.async {
+                self.showSilentPushAlert(badgeCount: badgeCount, contentAvailable: contentAvailable)
+            }
+            // Don't show the system notification UI for silent push
+            
+            completionHandler([])
+            return
+        }
+        
+        completionHandler([.banner, .badge, .sound])
+    }
+    
+    // The method will be called on the delegate when the user responded to the notification by opening the application, dismissing the notification or choosing a UNNotificationAction. The delegate must be set before the application returns from applicationDidFinishLaunching:.
+    public func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        print("🔔 [APP] Push notification tapped - processing with Iterable SDK")
+        print("🔔 [APP] Full notification payload: \(response.notification.request.content.userInfo)")
+        print("🔔 [APP] Notification title: \(response.notification.request.content.title)")
+        print("🔔 [APP] Notification body: \(response.notification.request.content.body)")
+        
+        // Set a breakpoint on the next line to see when push notifications are tapped
+        let actionIdentifier = response.actionIdentifier
+        print("🔔 [APP] Action identifier: \(actionIdentifier)")
+        
+        // Log Iterable-specific data if present
+        if let iterableData = response.notification.request.content.userInfo["itbl"] as? [String: Any] {
+            print("🔔 [APP] Iterable-specific data: \(iterableData)")
+            
+            if let deepLinkURL = iterableData["deepLinkURL"] as? String {
+                print("🔗 [APP] Deep link URL found in payload: \(deepLinkURL)")
+            }
+            
+            if let campaignId = iterableData["campaignId"] {
+                print("📊 [APP] Campaign ID: \(campaignId)")
+            }
+        }
+        
+        // Log APS data
+        if let apsData = response.notification.request.content.userInfo["aps"] as? [String: Any] {
+            print("🍎 [APP] APS data: \(apsData)")
+        }
+        
+        // ITBL: This should process the notification and trigger deep link handling
+        print("🔔 About to call IterableAppIntegration.userNotificationCenter")
+        print("🔔 IterableAPI.email: \(IterableAPI.email ?? "nil")")
+        IterableAppIntegration.userNotificationCenter(center, didReceive: response, withCompletionHandler: completionHandler)
+        print("🔔 IterableAppIntegration.userNotificationCenter completed")
+    }
+}
+
+// MARK: - IterableURLDelegate
+
+extension AppDelegate: IterableURLDelegate {
+    // return true if we handled the url
+    func handle(iterableURL url: URL, inContext context: IterableActionContext) -> Bool {
+        print("========================================")
+        print("🔗 BREAKPOINT HERE: IterableURLDelegate.handle called!")
+        print("🔗 URL: \(url.absoluteString)")
+        print("🔗 URL host: \(url.host ?? "nil")")
+        print("🔗 URL path: \(url.path)")
+        print("🔗 URL scheme: \(url.scheme ?? "nil")")
+        print("🔗 Context source: \(context.source)")
+        print("🔗 Context action: \(context.action)")
+        print("========================================")
+        
+        // Set a breakpoint on the next line to see if this method gets called
+        let urlScheme = url.scheme ?? "no-scheme"
+        
+        // Handle tester:// deep links (unwrapped destination URLs)
+        if url.scheme == "tester" {
+            print("✅ App is opened via Iterable deep link - tester://")
+            
+            // Check if this is the testview deep link
+            if url.host == "testview" {
+                print("🎯 Testview deep link detected - showing TestViewController")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    self.showAlert(with: "Deep link to Test View", and: "Deep link handled with Success!")
+                }
+                return true
+            } else if url.host == "iterableurldelegate" {
+                DispatchQueue.main.async {
+                    self.showAlert(with: "IterableURLDelegate called", and: "Deep link handled with Iterable URL")
+                }
+            }
+            
+            // Show alert for other deep links
+            DispatchQueue.main.async {
+                self.showDeepLinkAlert(url: url)
+            }
+            
+            // Post notification that the app was opened via deep link
+            NotificationCenter.default.post(name: NSNotification.Name("AppOpenedViaDeepLink"), object: url)
+            
+            return true // We handled this URL
+        }
+        
+        // Handle https:// links (could be unwrapped universal links)
+        if url.scheme == "https" {
+            print("🌐 HTTPS URL received in URL delegate: \(url.absoluteString)")
+            
+            // Check if this is from our tracking domain (shouldn't happen if SDK unwrapped correctly)
+            if url.host == "links.tsetester.com" {
+                print("⚠️ Received wrapped tracking URL - SDK may not have unwrapped it")
+            }
+            
+            // Handle tsetester.com URLs with routing
+            if url.host == "tsetester.com" {
+                print("🎯 tsetester.com URL detected: \(url.path)")
+                
+                if url.path.hasPrefix("/update/") {
+                    print("📱 Navigating to update screen for path: \(url.path)")
+                    DispatchQueue.main.async {
+                        self.navigateToUpdateScreen(url: url)
+                    }
+                    return true
+                }
+                
+                // For other tsetester.com paths, show generic alert
+                print("📱 Showing alert for tsetester.com path: \(url.path)")
+                DispatchQueue.main.async {
+                    self.showDeepLinkAlert(url: url)
+                }
+                return true
+            }
+            
+            // Show alert for other HTTPS deep links
+            DispatchQueue.main.async {
+                self.showDeepLinkAlert(url: url)
+            }
+            
+            return true
+        }
+        
+        print("🔗 URL scheme '\(url.scheme ?? "nil")' not handled by our app")
+        return false // We didn't handle this URL
+    }
+}
+
+// MARK: IterableCustomActionDelegate
+
+extension AppDelegate: IterableCustomActionDelegate {
+    
+    // handle the custom action from push
+    // return value true/false doesn't matter here, stored for future use
+    func handle(iterableCustomAction action: IterableAction, inContext _: IterableActionContext) -> Bool {
+        if action.type == "showtestsuccess" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                self.showAlert(with: "Custom Action", and: "Custom Action Handled")
+            }
+            return true
+        }
+        return false
+    }
+}

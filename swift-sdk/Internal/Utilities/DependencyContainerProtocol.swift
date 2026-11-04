@@ -16,7 +16,7 @@ protocol DependencyContainerProtocol: RedirectNetworkSessionProvider {
     var notificationCenter: NotificationCenterProtocol { get }
     var apnsTypeChecker: APNSTypeCheckerProtocol { get }
     
-    func createInAppFetcher(apiClient: ApiClientProtocol) -> InAppFetcherProtocol
+    func createInAppFetcher(apiClient: ApiClientProtocol, authManager: IterableAuthManagerProtocol?) -> InAppFetcherProtocol
     func createPersistenceContextProvider() -> IterablePersistenceContextProvider?
     func createRequestHandler(apiKey: String,
                               config: IterableConfig,
@@ -24,7 +24,8 @@ protocol DependencyContainerProtocol: RedirectNetworkSessionProvider {
                               authProvider: AuthProvider?,
                               authManager: IterableAuthManagerProtocol,
                               deviceMetadata: DeviceMetadata,
-                              offlineMode: Bool) -> RequestHandlerProtocol
+                              offlineMode: Bool,
+                              autoRetry: Bool) -> RequestHandlerProtocol
     func createHealthMonitorDataProvider(persistenceContextProvider: IterablePersistenceContextProvider) -> HealthMonitorDataProviderProtocol
 }
 
@@ -32,21 +33,35 @@ extension DependencyContainerProtocol {
     func createInAppManager(config: IterableConfig,
                             apiClient: ApiClientProtocol,
                             requestHandler: RequestHandlerProtocol,
-                            deviceMetadata: DeviceMetadata) -> IterableInternalInAppManagerProtocol {
-        InAppManager(requestHandler: requestHandler,
-                     deviceMetadata: deviceMetadata,
-                     fetcher: createInAppFetcher(apiClient: apiClient),
-                     displayer: inAppDisplayer,
-                     persister: inAppPersister,
-                     inAppDelegate: config.inAppDelegate,
-                     urlDelegate: config.urlDelegate,
-                     customActionDelegate: config.customActionDelegate,
-                     urlOpener: urlOpener,
-                     allowedProtocols: config.allowedProtocols,
-                     applicationStateProvider: applicationStateProvider,
-                     notificationCenter: notificationCenter,
-                     dateProvider: dateProvider,
-                     moveToForegroundSyncInterval: config.inAppDisplayInterval)
+                            deviceMetadata: DeviceMetadata,
+                            authProvider: AuthProvider,
+                            identityCoordinator: IdentityCoordinator,
+                            authManager: IterableAuthManagerProtocol?) -> IterableInternalInAppManagerProtocol {
+        let identityProvider = { [weak authProvider] in
+            UserIdentitySnapshot(auth: authProvider?.auth)
+        }
+        let jsonOnlyMessageStore = JsonOnlyMessageStore(localStorage: localStorage,
+                                                        dateProvider: dateProvider,
+                                                        identityProvider: identityProvider,
+                                                        identityCoordinator: identityCoordinator)
+        return InAppManager(requestHandler: requestHandler,
+                            deviceMetadata: deviceMetadata,
+                            fetcher: createInAppFetcher(apiClient: apiClient, authManager: authManager),
+                            displayer: inAppDisplayer,
+                            persister: inAppPersister,
+                            inAppDelegate: config.inAppDelegate,
+                            inAppDisplayDelegate: config.inAppDisplayDelegate,
+                            urlDelegate: config.urlDelegate,
+                            customActionDelegate: config.customActionDelegate,
+                            urlOpener: urlOpener,
+                            allowedProtocols: config.allowedProtocols,
+                            applicationStateProvider: applicationStateProvider,
+                            notificationCenter: notificationCenter,
+                            dateProvider: dateProvider,
+                            jsonOnlyMessageStore: jsonOnlyMessageStore,
+                            identityCoordinator: identityCoordinator,
+                            identityProvider: identityProvider,
+                            moveToForegroundSyncInterval: config.inAppDisplayInterval)
     }
     
     func createAuthManager(config: IterableConfig) -> IterableAuthManagerProtocol {
@@ -58,13 +73,15 @@ extension DependencyContainerProtocol {
     }
 
     func createEmbeddedManager(config: IterableConfig,
-                                        apiClient: ApiClientProtocol) -> IterableInternalEmbeddedManagerProtocol {
+                                        apiClient: ApiClientProtocol,
+                                        authManager: IterableAuthManagerProtocol? = nil) -> IterableInternalEmbeddedManagerProtocol {
         IterableEmbeddedManager(apiClient: apiClient,
                                 urlDelegate: config.urlDelegate,
                                 customActionDelegate: config.customActionDelegate,
                                 urlOpener: urlOpener,
                                 allowedProtocols: config.allowedProtocols,
-                                enableEmbeddedMessaging: config.enableEmbeddedMessaging)
+                                enableEmbeddedMessaging: config.enableEmbeddedMessaging,
+                                authManager: authManager)
     }
     
     func createRequestHandler(apiKey: String,
@@ -73,7 +90,8 @@ extension DependencyContainerProtocol {
                               authProvider: AuthProvider?,
                               authManager: IterableAuthManagerProtocol,
                               deviceMetadata: DeviceMetadata,
-                              offlineMode: Bool) -> RequestHandlerProtocol {
+                              offlineMode: Bool,
+                              autoRetry: Bool) -> RequestHandlerProtocol {
         let onlineProcessor = OnlineRequestProcessor(apiKey: apiKey,
                                                      authProvider: authProvider,
                                                      authManager: authManager,
@@ -87,7 +105,9 @@ extension DependencyContainerProtocol {
             return RequestHandler(onlineProcessor: onlineProcessor,
                                   offlineProcessor: nil,
                                   healthMonitor: nil,
-                                  offlineMode: offlineMode)
+                                  authProvider: authProvider,
+                                  offlineMode: offlineMode,
+                                  autoRetry: autoRetry)
         }
         if offlineMode {
             
@@ -104,19 +124,25 @@ extension DependencyContainerProtocol {
                                                        taskScheduler: createTaskScheduler(persistenceContextProvider: persistenceContextProvider,
                                                                                           healthMonitor: healthMonitor!),
                                                        taskRunner: createTaskRunner(persistenceContextProvider: persistenceContextProvider,
-                                                                                    healthMonitor: healthMonitor!),
+                                                                                    healthMonitor: healthMonitor!,
+                                                                                    autoRetry: localStorage.autoRetry,
+                                                                                    authManager: authManager),
                                                        notificationCenter: notificationCenter)
             
             
             return RequestHandler(onlineProcessor: onlineProcessor,
                                   offlineProcessor: offlineProcessor,
                                   healthMonitor: healthMonitor,
-                                  offlineMode: offlineMode)
+                                  authProvider: authProvider,
+                                  offlineMode: offlineMode,
+                                  autoRetry: autoRetry)
         } else {
             return RequestHandler(onlineProcessor: onlineProcessor,
                                   offlineProcessor: nil,
                                   healthMonitor: nil,
-                                  offlineMode: offlineMode)
+                                  authProvider: authProvider,
+                                  offlineMode: offlineMode,
+                                  autoRetry: autoRetry)
         }
     }
     
@@ -131,6 +157,13 @@ extension DependencyContainerProtocol {
     func createRedirectNetworkSession(delegate: RedirectNetworkSessionDelegate) -> NetworkSessionProtocol {
         RedirectNetworkSession(delegate: delegate)
     }
+
+    func createUnknownUserManager(config: IterableConfig) -> UnknownUserManager {
+        UnknownUserManager(config:config,
+                           localStorage: localStorage,
+                           dateProvider: dateProvider,
+                           notificationStateProvider: notificationStateProvider)
+    }
     
     private func createTaskScheduler(persistenceContextProvider: IterablePersistenceContextProvider,
                                      healthMonitor: HealthMonitor) -> IterableTaskScheduler {
@@ -141,11 +174,19 @@ extension DependencyContainerProtocol {
     }
     
     private func createTaskRunner(persistenceContextProvider: IterablePersistenceContextProvider,
-                                  healthMonitor: HealthMonitor) -> IterableTaskRunner {
+                                  healthMonitor: HealthMonitor,
+                                  autoRetry: Bool = false,
+                                  authManager: IterableAuthManagerProtocol? = nil) -> IterableTaskRunner {
         IterableTaskRunner(networkSession: networkSession,
                            persistenceContextProvider: persistenceContextProvider,
                            healthMonitor: healthMonitor,
                            notificationCenter: notificationCenter,
-                           connectivityManager: NetworkConnectivityManager())
+                           connectivityManager: NetworkConnectivityManager(),
+                           autoRetry: autoRetry,
+                           authManager: authManager)
+    }
+    
+    func createUnknownUserMerge(apiClient: ApiClient, unknownUserManager: UnknownUserManagerProtocol, localStorage: LocalStorageProtocol) -> UnknownUserMergeProtocol {
+        UnknownUserMerge(apiClient: apiClient, unknownUserManager: unknownUserManager, localStorage: localStorage)
     }
 }

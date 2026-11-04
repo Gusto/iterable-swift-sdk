@@ -681,6 +681,102 @@ class IterableAPITests: XCTestCase {
         
         wait(for: [expectation], timeout: testExpectationTimeout)
     }
+
+    @available(iOS 13.0, *)
+    func testDisableDeviceForCurrentUserAsyncSuccess() async throws {
+        let oldImplementation = IterableAPI.implementation
+        defer { IterableAPI.implementation = oldImplementation }
+
+        let networkSession = MockNetworkSession(statusCode: 200)
+        let token = try await setUpIterableAPIForAsyncDisableDevice(networkSession: networkSession)
+
+        try await IterableAPI.disableDeviceForCurrentUser()
+
+        guard let request = networkSession.getRequest(withEndPoint: Const.Path.disableDevice) else {
+            return XCTFail("Expected disableDevice request")
+        }
+        guard let body = TestUtils.getRequestBody(request: request) else {
+            return XCTFail("Expected disableDevice request body")
+        }
+
+        TestUtils.validate(request: request,
+                           requestType: .post,
+                           apiEndPoint: Endpoint.api,
+                           path: Const.Path.disableDevice,
+                           queryParams: [])
+        TestUtils.validateElementPresent(withName: JsonKey.token, andValue: token.hexString(), inDictionary: body)
+        TestUtils.validateElementPresent(withName: JsonKey.email, andValue: "user@example.com", inDictionary: body)
+    }
+
+    @available(iOS 13.0, *)
+    func testDisableDeviceForAllUsersAsyncSuccess() async throws {
+        let oldImplementation = IterableAPI.implementation
+        defer { IterableAPI.implementation = oldImplementation }
+
+        let networkSession = MockNetworkSession(statusCode: 200)
+        let token = try await setUpIterableAPIForAsyncDisableDevice(networkSession: networkSession)
+
+        try await IterableAPI.disableDeviceForAllUsers()
+
+        guard let request = networkSession.getRequest(withEndPoint: Const.Path.disableDevice) else {
+            return XCTFail("Expected disableDevice request")
+        }
+        guard let body = TestUtils.getRequestBody(request: request) else {
+            return XCTFail("Expected disableDevice request body")
+        }
+
+        TestUtils.validate(request: request,
+                           requestType: .post,
+                           apiEndPoint: Endpoint.api,
+                           path: Const.Path.disableDevice,
+                           queryParams: [])
+        TestUtils.validateElementPresent(withName: JsonKey.token, andValue: token.hexString(), inDictionary: body)
+        TestUtils.validateElementNotPresent(withName: JsonKey.email, inDictionary: body)
+        TestUtils.validateElementNotPresent(withName: JsonKey.userId, inDictionary: body)
+    }
+
+    @available(iOS 13.0, *)
+    func testDisableDeviceForCurrentUserAsyncFailureThrowsSendRequestError() async throws {
+        let oldImplementation = IterableAPI.implementation
+        defer { IterableAPI.implementation = oldImplementation }
+
+        let failureReason = "disable failed"
+        let networkSession = MockNetworkSession(responseCallback: { url in
+            if url.absoluteString.contains(Const.Path.disableDevice) {
+                return MockNetworkSession.MockResponse(statusCode: 400,
+                                                       data: ["msg": failureReason].toJsonData())
+            }
+            return MockNetworkSession.MockResponse(statusCode: 200)
+        })
+        _ = try await setUpIterableAPIForAsyncDisableDevice(networkSession: networkSession)
+
+        do {
+            try await IterableAPI.disableDeviceForCurrentUser()
+            XCTFail("Expected disableDeviceForCurrentUser async API to throw")
+        } catch let error as SendRequestError {
+            XCTAssertEqual(error.reason, failureReason)
+            XCTAssertEqual(error.data, ["msg": failureReason].toJsonData())
+        } catch {
+            XCTFail("Expected SendRequestError, got \(error)")
+        }
+    }
+
+    @available(iOS 13.0, *)
+    func testDisableDeviceForCurrentUserAsyncNotInitializedThrowsSendRequestError() async {
+        let oldImplementation = IterableAPI.implementation
+        IterableAPI.implementation = nil
+        defer { IterableAPI.implementation = oldImplementation }
+
+        do {
+            try await IterableAPI.disableDeviceForCurrentUser()
+            XCTFail("Expected disableDeviceForCurrentUser async API to throw")
+        } catch let error as SendRequestError {
+            XCTAssertEqual(error.reason, "Iterable SDK is not initialized")
+            XCTAssertNil(error.data)
+        } catch {
+            XCTFail("Expected SendRequestError, got \(error)")
+        }
+    }
     
     func testUpdateCart() {
         let condition1 = XCTestExpectation(description: #function)
@@ -926,29 +1022,8 @@ class IterableAPITests: XCTestCase {
         wait(for: [expectation1], timeout: testExpectationTimeout)
     }
     
-    func testInAppConsume() {
-        let expectation1 = expectation(description: "get in app messages")
+    func testInAppConsumeRemovesInboxMessageBeforeNotifying() {
         let messageId = UUID().uuidString
-        
-        let networkSession = MockNetworkSession(statusCode: 200)
-        let config = IterableConfig()
-        let internalAPI = InternalIterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey, config: config, networkSession: networkSession)
-        internalAPI.email = "user@example.com"
-        networkSession.callback = { _, response, _ in
-            guard let (request, body) = TestUtils.matchingRequest(networkSession: networkSession,
-                                                                  response: response,
-                                                                  endPoint: Const.Path.inAppConsume) else {
-                return
-            }
-            TestUtils.validate(request: request,
-                               requestType: .post,
-                               apiEndPoint: Endpoint.api,
-                               path: Const.Path.inAppConsume,
-                               queryParams: [])
-            TestUtils.validateElementPresent(withName: "messageId", andValue: messageId, inDictionary: body)
-            expectation1.fulfill()
-        }
-        
         let message = IterableInAppMessage(messageId: messageId,
                                            campaignId: 1,
                                            trigger: IterableInAppTrigger(dict: [JsonKey.InApp.type: "never"]),
@@ -958,50 +1033,178 @@ class IterableAPITests: XCTestCase {
                                            saveToInbox: true,
                                            inboxMetadata: nil,
                                            customPayload: nil)
-        internalAPI.inAppConsume(message: message)
-        wait(for: [expectation1], timeout: testExpectationTimeout)
-    }
-    
-    func testTrackInAppConsumeWithSource() {
-        let messageId = "message1"
-        let expectation1 = expectation(description: "testTrackInAppConsumeWithSource")
-        
+        let mockInAppFetcher = MockInAppFetcher(messages: [message])
+        let mockNotificationCenter = MockNotificationCenter()
+        let initialInboxExpectation = expectation(description: "initial inbox load")
+        let initialReference = mockNotificationCenter.addCallback(forNotification: .iterableInboxChanged) { _ in
+            initialInboxExpectation.fulfill()
+        }
         let networkSession = MockNetworkSession(statusCode: 200)
-        let internalAPI = InternalIterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey, networkSession: networkSession)
-        internalAPI.email = IterableAPITests.email
-        
-        networkSession.callback = { _, response, _ in
-            guard let (request, body) = TestUtils.matchingRequest(networkSession: networkSession,
-                                                                  response: response,
-                                                                  endPoint: Const.Path.inAppConsume) else {
+        let localStorage = MockLocalStorage()
+        localStorage.email = IterableAPITests.email
+        let config = IterableConfig()
+        let internalAPI = InternalIterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey,
+                                                                   config: config,
+                                                                   networkSession: networkSession,
+                                                                   localStorage: localStorage,
+                                                                   inAppFetcher: mockInAppFetcher,
+                                                                   notificationCenter: mockNotificationCenter)
+        let oldImplementation = IterableAPI.implementation
+        IterableAPI.implementation = internalAPI
+        defer { IterableAPI.implementation = oldImplementation }
+
+        wait(for: [initialInboxExpectation], timeout: testExpectationTimeout)
+        mockNotificationCenter.removeCallbacks(withIds: initialReference.callbackId)
+        XCTAssertEqual(internalAPI.inAppManager.getInboxMessages().count, 1)
+
+        let requestExpectation = expectation(description: "in-app consume request")
+        requestExpectation.assertForOverFulfill = true
+        networkSession.requestCallback = { request in
+            guard request.url?.absoluteString.contains(Const.Path.inAppConsume) == true else {
                 return
             }
-            
             TestUtils.validate(request: request,
                                requestType: .post,
                                apiEndPoint: Endpoint.api,
                                path: Const.Path.inAppConsume,
                                queryParams: [])
+            let body = request.httpBody!.json() as! [String: Any]
+            TestUtils.validateMessageContext(messageId: messageId,
+                                             email: IterableAPITests.email,
+                                             saveToInbox: true,
+                                             silentInbox: true,
+                                             location: .inbox,
+                                             inBody: body)
+            requestExpectation.fulfill()
+        }
+
+        let notificationExpectation = expectation(description: "inbox changed after consume")
+        notificationExpectation.assertForOverFulfill = true
+        let notificationReference = mockNotificationCenter.addCallback(forNotification: .iterableInboxChanged) { _ in
+            XCTAssertEqual(internalAPI.inAppManager.getInboxMessages().count, 0)
+            notificationExpectation.fulfill()
+        }
+
+        IterableAPI.inAppConsume(message: message, location: .inbox)
+
+        wait(for: [requestExpectation, notificationExpectation], timeout: testExpectationTimeout)
+        XCTAssertEqual(networkSession.requests.filter { $0.url?.absoluteString.contains(Const.Path.inAppConsume) == true }.count, 1)
+        mockNotificationCenter.removeCallbacks(withIds: notificationReference.callbackId)
+    }
+
+    func testInAppConsumeWithSourceRemovesInboxMessageBeforeNotifying() {
+        let messageId = "message1"
+        let message = IterableInAppMessage(messageId: messageId,
+                                           campaignId: 1,
+                                           trigger: IterableInAppTrigger(dict: [JsonKey.InApp.type: "never"]),
+                                           createdAt: nil,
+                                           expiresAt: nil,
+                                           content: IterableHtmlInAppContent(edgeInsets: .zero, html: ""),
+                                           saveToInbox: true,
+                                           inboxMetadata: nil,
+                                           customPayload: nil)
+        let mockInAppFetcher = MockInAppFetcher(messages: [message])
+        let mockNotificationCenter = MockNotificationCenter()
+        let initialInboxExpectation = expectation(description: "initial inbox load")
+        let initialReference = mockNotificationCenter.addCallback(forNotification: .iterableInboxChanged) { _ in
+            initialInboxExpectation.fulfill()
+        }
+        let networkSession = MockNetworkSession(statusCode: 200)
+        let localStorage = MockLocalStorage()
+        localStorage.email = IterableAPITests.email
+        let internalAPI = InternalIterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey,
+                                                                   networkSession: networkSession,
+                                                                   localStorage: localStorage,
+                                                                   inAppFetcher: mockInAppFetcher,
+                                                                   notificationCenter: mockNotificationCenter)
+        let oldImplementation = IterableAPI.implementation
+        IterableAPI.implementation = internalAPI
+        defer { IterableAPI.implementation = oldImplementation }
+
+        wait(for: [initialInboxExpectation], timeout: testExpectationTimeout)
+        mockNotificationCenter.removeCallbacks(withIds: initialReference.callbackId)
+        XCTAssertEqual(internalAPI.inAppManager.getInboxMessages().count, 1)
+
+        let requestExpectation = expectation(description: "in-app consume request")
+        requestExpectation.assertForOverFulfill = true
+        networkSession.requestCallback = { request in
+            guard request.url?.absoluteString.contains(Const.Path.inAppConsume) == true else {
+                return
+            }
+            TestUtils.validate(request: request,
+                               requestType: .post,
+                               apiEndPoint: Endpoint.api,
+                               path: Const.Path.inAppConsume,
+                               queryParams: [])
+            let body = request.httpBody!.json() as! [String: Any]
             TestUtils.validateMessageContext(messageId: messageId, email: IterableAPITests.email, saveToInbox: true, silentInbox: true, location: .inbox, inBody: body)
             TestUtils.validateDeviceInfo(inBody: body, withDeviceId: internalAPI.deviceId)
             TestUtils.validateMatch(keyPath: KeyPath(string: "\(JsonKey.deleteAction)"), value: InAppDeleteSource.deleteButton.jsonValue as! String, inDictionary: body)
-            
-            expectation1.fulfill()
+            requestExpectation.fulfill()
         }
-        
+
+        let notificationExpectation = expectation(description: "inbox changed after consume")
+        notificationExpectation.assertForOverFulfill = true
+        let notificationReference = mockNotificationCenter.addCallback(forNotification: .iterableInboxChanged) { _ in
+            XCTAssertEqual(internalAPI.inAppManager.getInboxMessages().count, 0)
+            notificationExpectation.fulfill()
+        }
+
+        IterableAPI.inAppConsume(message: message, location: .inbox, source: .deleteButton)
+
+        wait(for: [requestExpectation, notificationExpectation], timeout: testExpectationTimeout)
+        XCTAssertEqual(networkSession.requests.filter { $0.url?.absoluteString.contains(Const.Path.inAppConsume) == true }.count, 1)
+        mockNotificationCenter.removeCallbacks(withIds: notificationReference.callbackId)
+    }
+
+    func testInAppConsumeNonInboxMessageDoesNotPostInboxChanged() {
+        let messageId = "message1"
         let message = IterableInAppMessage(messageId: messageId,
                                            campaignId: 1,
                                            trigger: IterableInAppTrigger(dict: [JsonKey.InApp.type: "never"]),
-                                           createdAt: nil,
-                                           expiresAt: nil,
                                            content: IterableHtmlInAppContent(edgeInsets: .zero, html: ""),
-                                           saveToInbox: true,
-                                           inboxMetadata: nil,
-                                           customPayload: nil)
-        
-        internalAPI.inAppConsume(message: message, location: .inbox, source: .deleteButton)
-        
-        wait(for: [expectation1], timeout: testExpectationTimeout)
+                                           saveToInbox: false)
+        let mockInAppFetcher = MockInAppFetcher(messages: [message])
+        let mockNotificationCenter = MockNotificationCenter()
+        let networkSession = MockNetworkSession(statusCode: 200)
+        let localStorage = MockLocalStorage()
+        localStorage.email = IterableAPITests.email
+        let internalAPI = InternalIterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey,
+                                                                   networkSession: networkSession,
+                                                                   localStorage: localStorage,
+                                                                   inAppFetcher: mockInAppFetcher,
+                                                                   notificationCenter: mockNotificationCenter)
+        let oldImplementation = IterableAPI.implementation
+        IterableAPI.implementation = internalAPI
+        defer { IterableAPI.implementation = oldImplementation }
+
+        XCTAssertEqual(internalAPI.inAppManager.getMessages().count, 1)
+
+        let requestExpectation = expectation(description: "in-app consume request")
+        networkSession.requestCallback = { request in
+            guard request.url?.absoluteString.contains(Const.Path.inAppConsume) == true else { return }
+            let body = request.httpBody!.json() as! [String: Any]
+            TestUtils.validateMessageContext(messageId: messageId,
+                                             email: IterableAPITests.email,
+                                             saveToInbox: false,
+                                             silentInbox: false,
+                                             location: .inApp,
+                                             inBody: body)
+            requestExpectation.fulfill()
+        }
+
+        let notificationExpectation = expectation(description: "no inbox change for non-inbox consume")
+        notificationExpectation.isInverted = true
+        let notificationReference = mockNotificationCenter.addCallback(forNotification: .iterableInboxChanged) { _ in
+            notificationExpectation.fulfill()
+        }
+
+        IterableAPI.inAppConsume(message: message, location: .inApp)
+
+        wait(for: [requestExpectation, notificationExpectation], timeout: testExpectationTimeoutForInverted)
+        XCTAssertEqual(internalAPI.inAppManager.getMessages().count, 0)
+        XCTAssertEqual(networkSession.requests.filter { $0.url?.absoluteString.contains(Const.Path.inAppConsume) == true }.count, 1)
+        mockNotificationCenter.removeCallbacks(withIds: notificationReference.callbackId)
     }
     
     func testUpdateSubscriptions() {
@@ -1048,6 +1251,67 @@ class IterableAPITests: XCTestCase {
         wait(for: [expectation1], timeout: testExpectationTimeout)
     }
     
+    func testIterableAPIUpdateSubscriptionsNotInitializedDoesNotCrash() {
+        let oldImplementation = IterableAPI.implementation
+        IterableAPI.implementation = nil
+        IterableAPI.updateSubscriptions(nil,
+                                        unsubscribedChannelIds: nil,
+                                        unsubscribedMessageTypeIds: nil,
+                                        subscribedMessageTypeIds: nil,
+                                        campaignId: nil,
+                                        templateId: nil,
+                                        onSuccess: nil,
+                                        onFailure: nil)
+        IterableAPI.implementation = oldImplementation
+    }
+    
+    func testIterableAPIUpdateSubscriptions() {
+        let expectation1 = expectation(description: "update subscriptions via IterableAPI")
+        let emailListIds = [NSNumber(value: 382)]
+        let unsubscibedChannelIds = [NSNumber(value: 7845), NSNumber(value: 1048)]
+        let unsubscribedMessageTypeIds = [NSNumber(value: 5671), NSNumber(value: 9087)]
+        let campaignId = NSNumber(value: 23)
+        let templateId = NSNumber(value: 10)
+        
+        let networkSession = MockNetworkSession(statusCode: 200)
+        networkSession.callback = { _, response, _ in
+            guard let (request, body) = TestUtils.matchingRequest(networkSession: networkSession,
+                                                                  response: response,
+                                                                  endPoint: Const.Path.updateSubscriptions) else {
+                return
+            }
+            TestUtils.validate(request: request,
+                               requestType: .post,
+                               apiEndPoint: Endpoint.api,
+                               path: Const.Path.updateSubscriptions,
+                               queryParams: [])
+            TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.emailListIds), value: emailListIds, inDictionary: body)
+            TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.unsubscribedChannelIds), value: unsubscibedChannelIds, inDictionary: body)
+            TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.unsubscribedMessageTypeIds), value: unsubscribedMessageTypeIds, inDictionary: body)
+            TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.campaignId), value: campaignId, inDictionary: body)
+            TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.templateId), value: templateId, inDictionary: body)
+            expectation1.fulfill()
+        }
+        
+        let config = IterableConfig()
+        let localStorage = MockLocalStorage()
+        localStorage.email = "user1@example.com"
+        IterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey,
+                                         config: config,
+                                         networkSession: networkSession,
+                                         localStorage: localStorage)
+        
+        IterableAPI.updateSubscriptions(emailListIds,
+                                        unsubscribedChannelIds: unsubscibedChannelIds,
+                                        unsubscribedMessageTypeIds: unsubscribedMessageTypeIds,
+                                        subscribedMessageTypeIds: nil,
+                                        campaignId: campaignId,
+                                        templateId: templateId,
+                                        onSuccess: nil,
+                                        onFailure: nil)
+        wait(for: [expectation1], timeout: testExpectationTimeout)
+    }
+    
     func testInitializeWithLaunchOptionsAndCustomAction() {
         let expectation1 = expectation(description: "initializeWithLaunchOptions")
         let userInfo: [AnyHashable: Any] = [
@@ -1088,14 +1352,14 @@ class IterableAPITests: XCTestCase {
                 "messageId": "messageId",
                 "defaultAction": [
                     "type": "openUrl",
-                    "data": "http://somewhere.com",
+                    "data": "https://somewhere.com",
                 ],
             ] as [String : Any],
         ]
         let launchOptions: [UIApplication.LaunchOptionsKey: Any] = [UIApplication.LaunchOptionsKey.remoteNotification: userInfo]
         let urlDelegate = MockUrlDelegate(returnValue: true)
         urlDelegate.callback = { url, _ in
-            XCTAssertEqual(url.absoluteString, "http://somewhere.com")
+            XCTAssertEqual(url.absoluteString, "https://somewhere.com")
             expectation1.fulfill()
         }
         let config = IterableConfig()
@@ -1118,7 +1382,7 @@ class IterableAPITests: XCTestCase {
                 "isGhostPush": false,
                 "defaultAction": [
                     "type": "openUrl",
-                    "data": "http://somewhere.com",
+                    "data": "https://somewhere.com",
                 ],
             ] as [String : Any],
         ]
@@ -1315,5 +1579,156 @@ class IterableAPITests: XCTestCase {
         XCTAssertEqual(localStorage.authToken, authToken)
         userDefaults.removePersistentDomain(forName: "upgrade.test")
     }
+    
+    // MARK: - Consent Timestamp Tests
+    
+    func testSetVisitorUsageTrackedStoresConsentTimestamp() {
+        let mockDateProvider = MockDateProvider()
+        let testDate = Date(timeIntervalSince1970: 1639490139)
+        mockDateProvider.currentDate = testDate
+        
+        let mockLocalStorage = MockLocalStorage()
+        let internalAPI = InternalIterableAPI.initializeForTesting(
+            apiKey: IterableAPITests.apiKey,
+            dateProvider: mockDateProvider,
+            localStorage: mockLocalStorage
+        )
+        
+        // Test consent given (true) stores timestamp
+        internalAPI.setVisitorUsageTracked(isVisitorUsageTracked: true)
+        
+        XCTAssertEqual(mockLocalStorage.visitorConsentTimestamp, Int64(testDate.timeIntervalSince1970 * 1000))
+        XCTAssertTrue(mockLocalStorage.visitorUsageTracked)
+    }
+    
+    func testSetVisitorUsageTrackedClearsConsentTimestamp() {
+        let mockDateProvider = MockDateProvider()
+        let testDate = Date(timeIntervalSince1970: 1639490139)
+        mockDateProvider.currentDate = testDate
+        
+        let mockLocalStorage = MockLocalStorage()
+        mockLocalStorage.visitorConsentTimestamp = Int64(testDate.timeIntervalSince1970 * 1000)
+        
+        let internalAPI = InternalIterableAPI.initializeForTesting(
+            apiKey: IterableAPITests.apiKey,
+            dateProvider: mockDateProvider,
+            localStorage: mockLocalStorage
+        )
+        
+        // Test consent revoked (false) clears timestamp
+        internalAPI.setVisitorUsageTracked(isVisitorUsageTracked: false)
+        
+        XCTAssertNil(mockLocalStorage.visitorConsentTimestamp)
+        XCTAssertFalse(mockLocalStorage.visitorUsageTracked)
+    }
+    
+    func testSetVisitorUsageTrackedMultipleCalls() {
+        let mockDateProvider = MockDateProvider()
+        let firstDate = Date(timeIntervalSince1970: 1639490139)
+        let secondDate = Date(timeIntervalSince1970: 1639490200)
+        
+        let mockLocalStorage = MockLocalStorage()
+        let internalAPI = InternalIterableAPI.initializeForTesting(
+            apiKey: IterableAPITests.apiKey,
+            dateProvider: mockDateProvider,
+            localStorage: mockLocalStorage
+        )
+        
+        // First consent given
+        mockDateProvider.currentDate = firstDate
+        internalAPI.setVisitorUsageTracked(isVisitorUsageTracked: true)
+        XCTAssertEqual(mockLocalStorage.visitorConsentTimestamp, Int64(firstDate.timeIntervalSince1970 * 1000))
+        
+        // Consent revoked
+        internalAPI.setVisitorUsageTracked(isVisitorUsageTracked: false)
+        XCTAssertNil(mockLocalStorage.visitorConsentTimestamp)
+        
+        // Consent given again with new timestamp
+        mockDateProvider.currentDate = secondDate
+        internalAPI.setVisitorUsageTracked(isVisitorUsageTracked: true)
+        XCTAssertEqual(mockLocalStorage.visitorConsentTimestamp, Int64(secondDate.timeIntervalSince1970 * 1000))
+    }
+    
+    func testSetVisitorUsageTrackedStoresTimestampInMilliseconds() {
+        let mockDateProvider = MockDateProvider()
+        let testDate = Date(timeIntervalSince1970: 1639490139) // December 14, 2021
+        mockDateProvider.currentDate = testDate
+        
+        let mockLocalStorage = MockLocalStorage()
+        let internalAPI = InternalIterableAPI.initializeForTesting(
+            apiKey: IterableAPITests.apiKey,
+            dateProvider: mockDateProvider,
+            localStorage: mockLocalStorage
+        )
+        
+        // Test consent given stores timestamp in milliseconds
+        internalAPI.setVisitorUsageTracked(isVisitorUsageTracked: true)
+        
+        let expectedTimestampInSeconds = Int64(testDate.timeIntervalSince1970)
+        let expectedTimestampInMilliseconds = expectedTimestampInSeconds * 1000
+        let actualTimestamp = mockLocalStorage.visitorConsentTimestamp!
+        
+        // Verify timestamp is in milliseconds (much larger than seconds)
+        XCTAssertEqual(actualTimestamp, expectedTimestampInMilliseconds)
+        XCTAssertTrue(actualTimestamp > expectedTimestampInSeconds, "Timestamp should be in milliseconds, not seconds")
+        
+        // Verify the timestamp makes sense when converted back to seconds
+        let convertedBackToSeconds = actualTimestamp / 1000
+        XCTAssertEqual(convertedBackToSeconds, expectedTimestampInSeconds)
+        
+        // Verify it's actually a December 2021 date when converted properly
+        let dateFromMilliseconds = Date(timeIntervalSince1970: TimeInterval(actualTimestamp) / 1000.0)
+        XCTAssertEqual(dateFromMilliseconds, testDate)
+    }
 
+    @available(iOS 13.0, *)
+    private func setUpIterableAPIForAsyncDisableDevice(networkSession: MockNetworkSession) async throws -> Data {
+        let config = IterableConfig()
+        config.pushIntegrationName = "my-push-integration"
+
+        IterableAPI.initializeForTesting(apiKey: IterableAPITests.apiKey,
+                                         config: config,
+                                         networkSession: networkSession)
+        IterableAPI.email = "user@example.com"
+
+        let token = "zeeToken".data(using: .utf8)!
+        try await registerTokenForAsyncDisableDevice(token)
+        return token
+    }
+
+    @available(iOS 13.0, *)
+    private func registerTokenForAsyncDisableDevice(_ token: Data) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let resumeGuard = TestAsyncContinuationResumeGuard()
+
+            IterableAPI.register(token: token, onSuccess: { _ in
+                resumeGuard.resume {
+                    continuation.resume(returning: ())
+                }
+            }, onFailure: { reason, data in
+                resumeGuard.resume {
+                    continuation.resume(throwing: SendRequestError(reason: reason, data: data))
+                }
+            })
+        }
+    }
+
+}
+
+private final class TestAsyncContinuationResumeGuard {
+    private let lock = NSLock()
+    private var didResume = false
+
+    func resume(_ block: () -> Void) {
+        lock.lock()
+        let shouldResume = !didResume
+        if shouldResume {
+            didResume = true
+        }
+        lock.unlock()
+
+        if shouldResume {
+            block()
+        }
+    }
 }

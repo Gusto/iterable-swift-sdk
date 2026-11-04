@@ -10,12 +10,23 @@ enum Endpoint {
     static let api = Endpoint.apiHostName + Const.apiPath
 }
 
+enum EventType {
+    static let customEvent = "customEvent"
+    static let purchase = "purchase"
+    static let updateUser = "user"
+    static let updateCart = "updateCart"
+    static let unknownSession = "unknownSession"
+    static let tokenRegistration = "tokenRegistration"
+    static let trackEvent = "trackEvent"
+}
+
 enum Const {
     static let apiPath = "/api/"
     
     static let deepLinkRegex = "/a/[a-zA-Z0-9]+"
     static let href = "href"
     static let exponentialFactor = 2.0
+    static let criteriaFetchingCooldown = 120000.0 // 120 seconds = 120,000 milliseconds
     
     enum Http {
         static let GET = "GET"
@@ -40,12 +51,29 @@ enum Const {
         static let updateEmail = "users/updateEmail"
         static let updateSubscriptions = "users/updateSubscriptions"
         static let getRemoteConfiguration = "mobile/getRemoteConfiguration"
+        static let mergeUser = "users/merge";
+        static let getCriteria = "unknownuser/list";
+        static let trackUnknownSession = "unknownuser/events/session";
+        static let trackConsent = "unknownuser/consent";
         static let getEmbeddedMessages = "embedded-messaging/messages"
         static let embeddedMessageReceived = "embedded-messaging/events/received"
         static let embeddedMessageClick = "embedded-messaging/events/click"
-        static let embeddedMessageDismiss = "embedded-messaging/events/dismiss"
-        static let embeddedMessageImpression = "embedded-messaging/events/impression"
         static let trackEmbeddedSession = "embedded-messaging/events/session"
+
+        /// API paths that do not require JWT authentication.
+        /// These can be executed even when the task runner is auth-paused.
+        static let unauthenticatedPaths: Set<String> = [
+            disableDevice,
+            getRemoteConfiguration,
+            mergeUser,
+            getCriteria,
+            trackUnknownSession,
+            trackConsent,
+        ]
+
+        static func requiresJWTAuth(_ path: String) -> Bool {
+            !unauthenticatedPaths.contains(path)
+        }
     }
     
     public enum UserDefault {
@@ -57,8 +85,18 @@ enum Const {
         static let deviceId = "itbl_device_id"
         static let sdkVersion = "itbl_sdk_version"
         static let offlineMode = "itbl_offline_mode"
+        static let autoRetry = "itbl_auto_retry"
+        static let unknownUserEvents = "itbl_unknown_user_events"
+        static let unknownUserUpdate = "itbl_unknown_user_update"
+        static let criteriaData = "itbl_criteria_data"
+        static let unknownUserSessions = "itbl_unknown_user_sessions"
+        static let matchedCriteria = "itbl_matched_criteria"
+        static let eventList = "itbl_event_list"
+        static let visitorUsageTracked = "itbl_visitor_usage_tracked"
+        static let visitorConsentTimestamp = "itbl_visitor_consent_timestamp"
         static let isNotificationsEnabled = "itbl_isNotificationsEnabled"
         static let hasStoredNotificationSetting = "itbl_hasStoredNotificationSetting"
+        static let jsonOnlyMessageQueue = "itbl_json_only_message_queue"
 
         static let attributionInfoExpiration = 24
     }
@@ -69,6 +107,7 @@ enum Const {
         enum Key {
             static let email = "itbl_email"
             static let userId = "itbl_userid"
+            static let userIdUnknownUser = "itbl_userid_unknown_user"
             static let authToken = "itbl_auth_token"
         }
     }
@@ -116,6 +155,11 @@ enum JsonKey {
     static let unsubscribedMessageTypeIds = "unsubscribedMessageTypeIds"
     static let subscribedMessageTypeIds = "subscribedMessageTypeIds"
     static let preferUserId = "preferUserId"
+    
+    static let sourceEmail = "sourceEmail"
+    static let sourceUserId = "sourceUserId"
+    static let destinationEmail = "destinationEmail"
+    static let destinationUserId = "destinationUserId"
     
     static let mergeNestedObjects = "mergeNestedObjects"
     
@@ -173,6 +217,7 @@ enum JsonKey {
     static let actionIdentifier = "actionIdentifier"
     static let userText = "userText"
     static let appAlreadyRunning = "appAlreadyRunning"
+    static let unknownSessionContext = "unknownSessionContext"
     
     static let html = "html"
     
@@ -182,11 +227,73 @@ enum JsonKey {
     
     static let contentType = "Content-Type"
     
+    // UUA
+    static let createNewFields = "createNewFields"
+    static let eventType = "eventType"
+    /// Legacy event-type discriminator key written to local storage prior to UUA naming
+    /// normalization. Read for one-shot migration only.
+    static let legacyEventType = "dataType"
+    /// Criteria payload field (from `/unknownuser/list`) that specifies which event type
+    /// a criteria applies to. Distinct from ``eventType``; happens to share the same string
+    /// as ``legacyEventType``, but is a permanent backend contract, not a storage migration.
+    static let criteriaDataType = "dataType"
+    static let eventTimeStamp = "eventTimeStamp"
+    static let criteriaSets = "criteriaSets"
+    static let matchedCriteriaId = "matchedCriteriaId"
+    static let mobilePushOptIn = "mobilePushOptIn"
+    
+    enum CriteriaItem {
+        static let searchQuery = "searchQuery"
+        static let criteriaId = "criteriaId"
+        static let searchQueries = "searchQueries"
+        static let combinator = "combinator"
+        static let searchCombo = "searchCombo"
+        static let field = "field"
+        static let comparatorType = "comparatorType"
+        static let fieldType = "fieldType"
+        static let value = "value"
+        static let values = "values"
+        static let minMatch = "minMatch"
+
+        enum Combinator {
+            static let and = "And"
+            static let or = "Or"
+            static let not = "Not"
+        }
+        
+        enum CartEventItemsPrefix {
+            static let updateCartItemPrefix = "updateCart.updatedShoppingCartItems"
+            static let purchaseItemPrefix = "shoppingCartItems"
+        }
+        
+        enum CartEventPrefix {
+            static let updateCartItemPrefix = CartEventItemsPrefix.updateCartItemPrefix + "."
+            static let purchaseItemPrefix = CartEventItemsPrefix.purchaseItemPrefix + "."
+        }
+        
+        enum Comparator {
+            static let Equals = "Equals"
+            static let DoesNotEquals = "DoesNotEqual"
+            static let IsSet = "IsSet"
+            static let GreaterThan = "GreaterThan"
+            static let LessThan = "LessThan"
+            static let GreaterThanOrEqualTo = "GreaterThanOrEqualTo"
+            static let LessThanOrEqualTo = "LessThanOrEqualTo"
+            static let Contains = "Contains"
+            static let StartsWith = "StartsWith"
+            static let MatchesRegex = "MatchesRegex"
+        }
+    }
+
     static let mobileFrameworkInfo = "mobileFrameworkInfo"
     
     static let frameworkType = "frameworkType"
     
-//    embedded
+// Consent tracking
+    static let consentTimestamp = "consentTimestamp"
+    static let isUserKnown = "isUserKnown"
+    
+    // Embedded Messages
     static let embeddedSessionId = "session"
     static let placementId = "placementId"
     static let embeddedSessionStart = "embeddedSessionStart"
@@ -231,6 +338,7 @@ enum JsonKey {
     enum Embedded {
         static let packageName = "packageName"
         static let sdkVersion = "SDKVersion"
+        static let placementIds = "placementIds"
     }
     
     enum Header {
@@ -303,9 +411,9 @@ enum JsonValue {
     }
 }
 
-public enum IterableDataRegion {
-    public static let US = "https://api.iterable.com/api/"
-    public static let EU = "https://api.eu.iterable.com/api/"
+@objc public class IterableDataRegion: NSObject {
+    @objc public static let US = "https://api.iterable.com/api/"
+    @objc public static let EU = "https://api.eu.iterable.com/api/"
 }
 
 public protocol JsonValueRepresentable {
@@ -384,6 +492,12 @@ extension Array: JsonValueRepresentable where Element: JsonValueRepresentable {
     }
 }
 
+extension Int64: JsonValueRepresentable {
+    public var jsonValue: Any {
+        self
+    }
+}
+
 enum MobileDeviceType: String, Codable {
     case iOS
     case Android
@@ -421,6 +535,12 @@ public enum IterableCustomActionName: String, CaseIterable {
     case delete
 }
 
+public enum MergeResult: String {
+    case mergenotrequired
+    case mergesuccessful
+    case mergefailed
+}
+
 public typealias ITEActionBlock = (String?) -> Void
 public typealias ITBURLCallback = (URL?) -> Void
 public typealias OnSuccessHandler = (_ data: [AnyHashable: Any]?) -> Void
@@ -428,3 +548,4 @@ public typealias OnFailureHandler = (_ reason: String?, _ data: Data?) -> Void
 public typealias UrlHandler = (URL) -> Bool
 public typealias CustomActionHandler = (String) -> Bool
 public typealias AuthTokenRetrievalHandler = (String?) -> Void
+public typealias MergeActionHandler = (MergeResult, String?) -> Void

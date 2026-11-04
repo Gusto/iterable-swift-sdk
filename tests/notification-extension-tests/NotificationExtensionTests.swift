@@ -62,6 +62,38 @@ class NotificationExtensionTests: XCTestCase {
         
         wait(for: [condition1], timeout: timeout)
     }
+
+    func testNotificationContentParserReadsActionButtonsFromStringItbl() {
+        let content = UNMutableNotificationContent()
+        let messageId = UUID().uuidString
+        content.userInfo = [
+            "itbl": jsonString(from: [
+                "messageId": messageId,
+                "actionButtons": [[
+                    "identifier": "openAppButton",
+                    "title": "Open App",
+                    "action": [:],
+                ] as [String : Any]]
+            ])
+        ]
+
+        let actions = NotificationContentParser.getNotificationActions(from: content)
+
+        XCTAssertEqual(NotificationContentParser.getIterableMessageId(from: content), messageId)
+        XCTAssertEqual(actions.count, 1)
+        XCTAssertEqual(actions.first?.identifier, "openAppButton")
+        XCTAssertEqual(actions.first?.title, "Open App")
+    }
+
+    func testNotificationContentParserIgnoresMalformedStringItbl() {
+        let content = UNMutableNotificationContent()
+        content.userInfo = [
+            "itbl": "{\"messageId\":\"12345\""
+        ]
+
+        XCTAssertNil(NotificationContentParser.getIterableMessageId(from: content))
+        XCTAssertTrue(NotificationContentParser.getNotificationActions(from: content).isEmpty)
+    }
     
     @available(iOS 14.0, *)
     func testPushImageAttachment() {
@@ -96,7 +128,43 @@ class NotificationExtensionTests: XCTestCase {
 
         wait(for: [condition1], timeout: timeout)
     }
-    
+
+    @available(iOS 14.0, *)
+    func testPushImageAttachmentFromStringItbl() {
+        // iOS-via-FCM delivers itbl as a JSON string; confirm the extension still retrieves
+        // the attachment end-to-end, not just that the parser reads the metadata.
+        let condition1 = expectation(description: "image attachment didn't function as expected")
+
+        let content = UNMutableNotificationContent()
+        let messageId = UUID().uuidString
+
+        content.userInfo = [
+            "itbl": jsonString(from: [
+                "messageId": messageId,
+                "attachment-url": "https://github.com/Iterable/swift-sdk/raw/master/images/Iterable-Logo.png"
+            ])
+        ]
+
+        let request = UNNotificationRequest(identifier: "request", content: content, trigger: nil)
+
+        appExtension.didReceive(request) { content in
+            XCTAssertEqual(content.attachments.count, 1)
+
+            guard let firstAttachment = content.attachments.first else {
+                XCTFail("attachment doesn't exist")
+                return
+            }
+
+            XCTAssertNotNil(firstAttachment.url)
+            XCTAssertEqual(firstAttachment.url.scheme, "file")
+            XCTAssertEqual(firstAttachment.type, UTType.png.identifier)
+
+            condition1.fulfill()
+        }
+
+        wait(for: [condition1], timeout: timeout)
+    }
+
     @available(iOS 14.0, *)
     func testPushVideoAttachment() {
         let condition1 = expectation(description: "video attachment didn't function as expected")
@@ -171,7 +239,7 @@ class NotificationExtensionTests: XCTestCase {
                         "openApp": true,
                         "action": [
                             "type": "openUrl",
-                            "data": "http://maps.apple.com/?ll=37.7828,-122.3984"
+                            "data": "https://maps.apple.com/?ll=37.7828,-122.3984"
                         ]
                     ],
                     [
@@ -383,7 +451,7 @@ class NotificationExtensionTests: XCTestCase {
                     "title": "Open App",
                     "action": [
                         "type": "openUrl",
-                        "data": "http://maps.apple.com/?ll=37.7828,-122.3984"
+                        "data": "https://maps.apple.com/?ll=37.7828,-122.3984"
                     ],
                 ] as [String : Any]],
             ] as [String : Any],
@@ -422,7 +490,7 @@ class NotificationExtensionTests: XCTestCase {
                     "title": "Open App",
                     "action": [
                         "type": "openUrl",
-                        "data": "http://maps.apple.com/?ll=37.7828,-122.3984"
+                        "data": "https://maps.apple.com/?ll=37.7828,-122.3984"
                     ],
                     "actionIcon": [
                         "iconType": "systemImage",
@@ -466,7 +534,7 @@ class NotificationExtensionTests: XCTestCase {
                     "title": "Open App",
                     "action": [
                         "type": "openUrl",
-                        "data": "http://maps.apple.com/?ll=37.7828,-122.3984"
+                        "data": "https://maps.apple.com/?ll=37.7828,-122.3984"
                     ],
                     "actionIcon": [
                         "iconType": "templateImage",
@@ -493,5 +561,10 @@ class NotificationExtensionTests: XCTestCase {
         }
         
         wait(for: [expectation1], timeout: timeout)
+    }
+
+    private func jsonString(from json: [String: Any]) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: json)
+        return String(data: data, encoding: .utf8)!
     }
 }

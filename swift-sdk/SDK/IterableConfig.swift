@@ -4,6 +4,25 @@
 
 import Foundation
 
+/// Protocol to provide dynamic control over in-app message display timing.
+/// This delegate allows the application to determine at the exact moment 
+/// whether an in-app message should be displayed, providing more granular
+/// control than the static `isAutoDisplayPaused` property.
+@objc public protocol IterableInAppDisplayDelegate {
+    
+    /// Called to determine if in-app messages should be automatically displayed at this moment.
+    /// This method is called just before an in-app message would be shown, allowing the app
+    /// to make a real-time decision based on current app state.
+    ///
+    /// - Parameter message: The in-app message that is about to be displayed
+    /// - Returns: `true` if automatic display should be paused (message will not show), `false` if display should proceed
+    ///
+    /// - Note: This method is called in addition to other display checks. If this returns `true`,
+    ///         the message will not be shown regardless of other conditions.
+    /// - Note: If this delegate is not set, the default behavior uses the `isAutoDisplayPaused` property.
+    @objc optional func isAutoDisplayPaused(for message: IterableInAppMessage) -> Bool
+}
+
 public enum IterableAPIMobileFrameworkType: String, Codable {
     case flutter = "flutter"
     case reactNative = "reactnative"
@@ -49,6 +68,7 @@ public struct IterableAPIMobileFrameworkInfo: Codable {
 @objc public protocol IterableInAppDelegate: AnyObject {
     /// This method is called when new in-app message is available.
     /// The default behavior is to `show` if you don't override this method.
+    /// For JSON-only messages, this callback is invoked without SDK locks held. A callback selected for a previous user may complete after a concurrent identity switch; the SDK revalidates afterward and stops later delivery steps, state changes, and consumption.
     ///
     /// - Parameters:
     ///     - message: `IterableInAppMessage` object containing information regarding in-app to display
@@ -56,6 +76,12 @@ public struct IterableAPIMobileFrameworkInfo: Codable {
     /// - Returns:Return `show` to show the in-app or `skip` to skip this.
     @objc(onNewMessage:)
     func onNew(message: IterableInAppMessage) -> InAppShowResponse
+
+    /// Called on the main thread when a JSON-only message is available locally.
+    /// This may be called more than once until the message is marked as handled.
+    /// This callback is invoked without SDK locks held. A callback selected for a previous user may complete after a concurrent identity switch; the SDK revalidates afterward and stops later delivery steps, state changes, and consumption.
+    @objc(onJsonOnlyMessageAvailable:)
+    optional func onJsonOnlyMessageAvailable(message: IterableInAppMessage)
 }
 
 /// The protocol for adjusting logging
@@ -66,12 +92,30 @@ public struct IterableAPIMobileFrameworkInfo: Codable {
     ///     - message: The message to log. The message will include file, method and line of the call.
     @objc(log:message:)
     func log(level: LogLevel, message: String)
+
+    /// Return whether a message at the given level should be formatted and logged.
+    /// If this optional method is not implemented, all levels will be formatted and logged.
+    /// - Parameter level: The logging level
+    @objc(shouldLog:)
+    optional func shouldLog(level: LogLevel) -> Bool
 }
 
 /// The delegate for getting the authentication token
 @objc public protocol IterableAuthDelegate: AnyObject {
     @objc func onAuthTokenRequested(completion: @escaping AuthTokenRetrievalHandler)
     @objc func onAuthFailure(_ authFailure: AuthFailure)
+}
+
+/// The delegate for getting the UserId once unknown user session tracked
+@objc public protocol IterableUnknownUserHandler: AnyObject {
+    @objc func onUnknownUserCreated(userId: String)
+
+    /// Called when the SDK fetches unknown user activation criteria successfully.
+    /// Fires on the main thread after the criteria response has been persisted to local storage, so it is safe to call track, trackPurchase, etc. from this callback and have those events evaluated against the just-arrived criteria set. Fires on every criteria fetch, implementation should take that into consideration.
+    @objc optional func onCriteriaReceived(criteria: [AnyHashable: Any])
+
+    /// Called on the main thread when the unknown user activation criteria fetch fails.
+    @objc optional func onCriteriaFetchFailed(reason: String)
 }
 
 /// Iterable Configuration Object. Use this when initializing the API.
@@ -100,7 +144,11 @@ public class IterableConfig: NSObject {
     
     /// Implement this protocol to enable token-based authentication with the Iterable SDK
     public weak var authDelegate: IterableAuthDelegate?
-    
+
+    /// Implement this protocol to get userId once the userId set for Unknown User
+    public weak var unknownUserHandler: IterableUnknownUserHandler?
+
+
     /// When set to `true`, IterableSDK will automatically register and deregister
     /// notification tokens.
     public var autoPushRegistration = true
@@ -126,6 +174,12 @@ public class IterableConfig: NSObject {
     /// If more than 1 in-app is available, we show the first.
     public var inAppDelegate: IterableInAppDelegate = DefaultInAppDelegate()
     
+    /// Implement this protocol to provide dynamic control over when in-app messages can be displayed.
+    /// This delegate allows real-time decision making about display timing, providing more granular
+    /// control than the static `isAutoDisplayPaused` property. If not set, the SDK will fall back
+    /// to using the `isAutoDisplayPaused` property.
+    public var inAppDisplayDelegate: IterableInAppDisplayDelegate?
+    
     /// How many seconds to wait before showing the next in-app, if there are more than one present
     public var inAppDisplayInterval: Double = 30.0
     
@@ -147,10 +201,21 @@ public class IterableConfig: NSObject {
     /// Sets data region which determines data center and endpoints used by the SDK
     public var dataRegion: String = IterableDataRegion.US
     
+    /// When set to `true`, IterableSDK will track all events when users are not logged into the application.
+    public var enableUnknownUserActivation = false
+    
+    /// Enables fetching of unknown user criteria on foreground when set to `true`
+    /// By default, the SDK will fetch unknown user criteria on foreground.
+    public var enableForegroundCriteriaFetch = true
+    
     /// Allows for fetching embedded messages.
     public var enableEmbeddedMessaging = false
+
+    // How many events can be stored in the local storage. By default limt is 100.
+    public var eventThresholdLimit: Int = 100
+    
+    public var identityResolution: IterableIdentityResolution = IterableIdentityResolution(replayOnVisitorToKnown: true, mergeOnUnknownToKnown: true)
     
     /// The type of mobile framework we are using.
     public var mobileFrameworkInfo: IterableAPIMobileFrameworkInfo?
 }
-

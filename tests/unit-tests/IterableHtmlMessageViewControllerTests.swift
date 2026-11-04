@@ -9,12 +9,15 @@ import WebKit
 @testable import IterableSDK
 
 class IterableHtmlMessageViewControllerTests: XCTestCase {
+    private var originalLogUtil: IterableLogUtil?
+
     override func setUp() {
         super.setUp()
+        originalLogUtil = IterableLogUtil.sharedInstance
     }
     
     override func tearDown() {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+        IterableLogUtil.sharedInstance = originalLogUtil
         super.tearDown()
     }
     
@@ -49,6 +52,14 @@ class IterableHtmlMessageViewControllerTests: XCTestCase {
                          messageLocation: .full,
                          expectedWebViewPosition: ViewPosition(width: 1234, height: 400, center: CGPoint(x: 617.0, y: 200.0)))
     }
+
+    func testWebViewFullPositioningWithSafeAreaInsetsReturnsParentPosition() {
+        checkPositioning(parentPosition: ViewPosition(width: 844, height: 390, center: CGPoint(x: 422, y: 195)),
+                         safeAreaInsets: UIEdgeInsets(top: 0, left: 47, bottom: 21, right: 0),
+                         inAppHeight: 200,
+                         messageLocation: .full,
+                         expectedWebViewPosition: ViewPosition(width: 844, height: 390, center: CGPoint(x: 422, y: 195)))
+    }
     
     func testWebViewTopPositioningWithSafeAreaInsets() {
         let inAppHeight: CGFloat = 200
@@ -63,11 +74,83 @@ class IterableHtmlMessageViewControllerTests: XCTestCase {
     }
     
     func testWebViewBottomPositioningWithSafeAreaInsets() {
+        // Bottom position extends into the safe area (matching how top extends behind the status bar).
+        // height = 200 + 30 (safeAreaBottom) = 230, centerY = 400 - 115 = 285
+        let inAppHeight: CGFloat = 200
+        let safeAreaBottom: CGFloat = 30
+        let calculatedHeight = inAppHeight + safeAreaBottom
+        let calculatedCenterY = 400 - calculatedHeight / 2
         checkPositioning(parentPosition: ViewPosition(width: 1234, height: 400, center: CGPoint(x: 617.0, y: 200.0)),
-                         safeAreaInsets: UIEdgeInsets(top: 25, left: 0, bottom: 30, right: 0),
-                         inAppHeight: 200,
+                         safeAreaInsets: UIEdgeInsets(top: 25, left: 0, bottom: safeAreaBottom, right: 0),
+                         inAppHeight: inAppHeight,
                          messageLocation: .bottom,
-                         expectedWebViewPosition: ViewPosition(width: 1234, height: 200, center: CGPoint(x: 617.0, y: 270.0)))
+                         expectedWebViewPosition: ViewPosition(width: 1234, height: calculatedHeight, center: CGPoint(x: 617.0, y: calculatedCenterY)))
+    }
+
+    func testWebViewPositioningWithPortraitSafeAreaInsets() {
+        let parentPosition = ViewPosition(width: 390, height: 844, center: CGPoint(x: 195, y: 422))
+        let safeAreaInsets = UIEdgeInsets(top: 47, left: 0, bottom: 34, right: 0)
+        let inAppHeight: CGFloat = 200
+
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .top,
+                         expectedWebViewPosition: ViewPosition(width: 390, height: 247, center: CGPoint(x: 195, y: 123.5)))
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .bottom,
+                         expectedWebViewPosition: ViewPosition(width: 390, height: 234, center: CGPoint(x: 195, y: 727)))
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .center,
+                         expectedWebViewPosition: ViewPosition(width: 390, height: 200, center: CGPoint(x: 195, y: 428.5)))
+    }
+
+    func testWebViewPositioningWithLandscapeRightSafeAreaInset() {
+        let parentPosition = ViewPosition(width: 844, height: 390, center: CGPoint(x: 422, y: 195))
+        let safeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 47)
+        let inAppHeight: CGFloat = 200
+
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .top,
+                         expectedWebViewPosition: ViewPosition(width: 797, height: 200, center: CGPoint(x: 398.5, y: 100)))
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .bottom,
+                         expectedWebViewPosition: ViewPosition(width: 797, height: 221, center: CGPoint(x: 398.5, y: 279.5)))
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .center,
+                         expectedWebViewPosition: ViewPosition(width: 797, height: 200, center: CGPoint(x: 398.5, y: 184.5)))
+    }
+
+    func testWebViewPositioningWithLandscapeLeftSafeAreaInset() {
+        let parentPosition = ViewPosition(width: 844, height: 390, center: CGPoint(x: 422, y: 195))
+        let safeAreaInsets = UIEdgeInsets(top: 0, left: 47, bottom: 21, right: 0)
+        let inAppHeight: CGFloat = 200
+
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .top,
+                         expectedWebViewPosition: ViewPosition(width: 797, height: 200, center: CGPoint(x: 445.5, y: 100)))
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .bottom,
+                         expectedWebViewPosition: ViewPosition(width: 797, height: 221, center: CGPoint(x: 445.5, y: 279.5)))
+        checkPositioning(parentPosition: parentPosition,
+                         safeAreaInsets: safeAreaInsets,
+                         inAppHeight: inAppHeight,
+                         messageLocation: .center,
+                         expectedWebViewPosition: ViewPosition(width: 797, height: 200, center: CGPoint(x: 445.5, y: 184.5)))
     }
     
     func testTopAnimation() {
@@ -214,6 +297,296 @@ class IterableHtmlMessageViewControllerTests: XCTestCase {
         viewController.webView(webView, decidePolicyFor: testAction, decisionHandler: testAction.decisionHandler)
         wait(for: [expectation1], timeout: testExpectationTimeout)
     }
+
+    // MARK: - injectViewportFitCover Tests
+
+    func testViewportFitCover_alreadyPresent_returnsUnchanged() {
+        let html = #"<html><head><meta name="viewport" content="width=device-width, viewport-fit=cover"></head><body></body></html>"#
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        XCTAssertEqual(result, html)
+    }
+
+    func testViewportFitCover_alreadyPresent_caseInsensitive() {
+        let html = #"<html><head><meta name="viewport" content="width=device-width, Viewport-Fit=Cover"></head><body></body></html>"#
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        XCTAssertEqual(result, html)
+    }
+
+    func testViewportFitCover_nameFirstViewportMeta_appendsToContent() {
+        let html = #"<html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body></body></html>"#
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        XCTAssertTrue(result.contains("width=device-width, initial-scale=1.0, viewport-fit=cover"))
+        // Ensure the rest of the HTML is preserved
+        XCTAssertTrue(result.contains("<body></body></html>"))
+    }
+
+    func testViewportFitCover_contentFirstViewportMeta_prependsToContent() {
+        let html = #"<html><head><meta content="width=device-width" name="viewport"></head><body></body></html>"#
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        XCTAssertTrue(result.contains("viewport-fit=cover"))
+        XCTAssertTrue(result.contains(#"name="viewport""#))
+    }
+
+    func testViewportFitCover_noViewportMeta_hasHead_insertsBeforeHeadClose() {
+        let html = "<html><head><title>Test</title></head><body></body></html>"
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#))
+        // The new meta tag should appear before </head>
+        let metaRange = result.range(of: "viewport-fit=cover")!
+        let headCloseRange = result.range(of: "</head>")!
+        XCTAssertTrue(metaRange.lowerBound < headCloseRange.lowerBound)
+    }
+
+    func testViewportFitCover_noHeadTag_prependsMetaTag() {
+        let html = "<body><p>Hello</p></body>"
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        XCTAssertTrue(result.hasPrefix(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#))
+        XCTAssertTrue(result.contains("<body><p>Hello</p></body>"))
+    }
+
+    func testViewportFitCover_emptyString_prependsMetaTag() {
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: "")
+        XCTAssertTrue(result.contains("viewport-fit=cover"))
+    }
+
+    func testViewportFitCover_preservesExistingViewportAttributes() {
+        let html = #"<html><head><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"></head><body></body></html>"#
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        // All original attributes should still be present
+        XCTAssertTrue(result.contains("width=device-width"))
+        XCTAssertTrue(result.contains("initial-scale=1.0"))
+        XCTAssertTrue(result.contains("maximum-scale=1.0"))
+        XCTAssertTrue(result.contains("viewport-fit=cover"))
+    }
+
+    func testViewportFitCover_doesNotDoubleInject() {
+        let html = #"<html><head><meta name="viewport" content="width=device-width"></head><body></body></html>"#
+        let firstPass = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        let secondPass = IterableHtmlMessageViewController.injectViewportFitCover(html: firstPass)
+        // Second pass should return unchanged since viewport-fit=cover already present
+        XCTAssertEqual(firstPass, secondPass)
+    }
+
+    func testViewportFitCover_nonViewportMetaContentFirst_doesNotModify() {
+        // A <meta content="..." name="description"> tag should NOT be modified
+        let html = #"<html><head><meta content="A description" name="description"></head><body></body></html>"#
+        let result = IterableHtmlMessageViewController.injectViewportFitCover(html: html)
+        // Should fall through to the "insert before </head>" path, not modify the description meta
+        XCTAssertTrue(result.contains(#"<meta content="A description" name="description">"#))
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#))
+    }
+
+    // MARK: - calculateAnimationDetail Full-Position Background Color Tests
+
+    func testFullAnimationDetail_withBgColor_shouldAnimate_usesActualBgColor() {
+        let bgColor = UIColor.red
+        let position = ViewPosition(width: 200, height: 100, center: CGPoint(x: 100, y: 50))
+        let input = InAppCalculations.AnimationInput(
+            position: position,
+            isModal: true,
+            shouldAnimate: true,
+            location: .full,
+            safeAreaInsets: .zero,
+            backgroundColor: bgColor
+        )
+        let detail = InAppCalculations.calculateAnimationDetail(animationInput: input)
+        XCTAssertNotNil(detail)
+        XCTAssertEqual(detail!.initial.bgColor, bgColor)
+    }
+
+    func testFullAnimationDetail_noBgColor_shouldAnimate_usesClear() {
+        let position = ViewPosition(width: 200, height: 100, center: CGPoint(x: 100, y: 50))
+        let input = InAppCalculations.AnimationInput(
+            position: position,
+            isModal: true,
+            shouldAnimate: true,
+            location: .full,
+            safeAreaInsets: .zero,
+            backgroundColor: nil
+        )
+        let detail = InAppCalculations.calculateAnimationDetail(animationInput: input)
+        XCTAssertNotNil(detail)
+        XCTAssertEqual(detail!.initial.bgColor, .clear)
+    }
+
+    func testFullAnimationDetail_withBgColor_noAnimate_usesActualBgColor() {
+        let bgColor = UIColor.blue
+        let position = ViewPosition(width: 200, height: 100, center: CGPoint(x: 100, y: 50))
+        let input = InAppCalculations.AnimationInput(
+            position: position,
+            isModal: true,
+            shouldAnimate: false,
+            location: .full,
+            safeAreaInsets: .zero,
+            backgroundColor: bgColor
+        )
+        let detail = InAppCalculations.calculateAnimationDetail(animationInput: input)
+        XCTAssertNotNil(detail)
+        XCTAssertEqual(detail!.initial.bgColor, bgColor)
+        XCTAssertEqual(detail!.final.bgColor, bgColor)
+    }
+
+    func testCenterAnimationDetail_withBgColor_shouldAnimate_usesClear() {
+        let bgColor = UIColor.green
+        let position = ViewPosition(width: 200, height: 100, center: CGPoint(x: 100, y: 50))
+        let input = InAppCalculations.AnimationInput(
+            position: position,
+            isModal: true,
+            shouldAnimate: true,
+            location: .center,
+            safeAreaInsets: .zero,
+            backgroundColor: bgColor
+        )
+        let detail = InAppCalculations.calculateAnimationDetail(animationInput: input)
+        XCTAssertNotNil(detail)
+        XCTAssertEqual(detail!.initial.bgColor, .clear)
+    }
+
+    func testCenterAnimationDetail_withBgColor_noAnimate_usesClear() {
+        let bgColor = UIColor.green
+        let position = ViewPosition(width: 200, height: 100, center: CGPoint(x: 100, y: 50))
+        let input = InAppCalculations.AnimationInput(
+            position: position,
+            isModal: true,
+            shouldAnimate: false,
+            location: .center,
+            safeAreaInsets: .zero,
+            backgroundColor: bgColor
+        )
+        let detail = InAppCalculations.calculateAnimationDetail(animationInput: input)
+        XCTAssertNotNil(detail)
+        XCTAssertEqual(detail!.initial.bgColor, .clear)
+        XCTAssertEqual(detail!.final.bgColor, bgColor)
+    }
+
+    func testTopAnimationDetail_withBgColor_shouldAnimate_usesClear() {
+        let bgColor = UIColor.purple
+        let position = ViewPosition(width: 200, height: 100, center: CGPoint(x: 100, y: 50))
+        let input = InAppCalculations.AnimationInput(
+            position: position,
+            isModal: true,
+            shouldAnimate: true,
+            location: .top,
+            safeAreaInsets: .zero,
+            backgroundColor: bgColor
+        )
+        let detail = InAppCalculations.calculateAnimationDetail(animationInput: input)
+        XCTAssertNotNil(detail)
+        XCTAssertEqual(detail!.initial.bgColor, .clear)
+    }
+    
+    func testWebViewFinishLoadingFlagBehavior() {
+        // This test verifies that the webViewDidFinishLoading flag prevents premature positioning
+        // SDK-92: Fix intermittent positioning issues caused by calculating position before DOM is ready
+
+        let html = "<html><body>Bottom Position Test</body></html>"
+        let padding = Padding(top: .percent(value: 0), left: 0, bottom: .percent(value: 10), right: 0)
+
+        let params = IterableHtmlMessageViewController.Parameters(html: html,
+                                                                   padding: padding,
+                                                                   isModal: true)
+
+        let viewController = IterableHtmlMessageViewController.create(parameters: params,
+                                                                      eventTracker: MockMessageViewControllerEventTracker(),
+                                                                      onClickCallback: nil)
+
+        // Load view to trigger viewDidLoad
+        _ = viewController.view
+
+        // The webViewDidFinishLoading flag should be false initially
+        let mirror = Mirror(reflecting: viewController)
+        let webViewDidFinishLoading = mirror.children.first(where: { $0.label == "webViewDidFinishLoading" })?.value as? Bool
+        XCTAssertEqual(webViewDidFinishLoading, false, "webViewDidFinishLoading should be false before didFinish is called")
+
+        // Simulate webview finishing load
+        viewController.webView(WKWebView(), didFinish: nil)
+
+        // Now the flag should be true
+        let mirrorAfter = Mirror(reflecting: viewController)
+        let webViewDidFinishLoadingAfter = mirrorAfter.children.first(where: { $0.label == "webViewDidFinishLoading" })?.value as? Bool
+        XCTAssertEqual(webViewDidFinishLoadingAfter, true, "webViewDidFinishLoading should be true after didFinish is called")
+    }
+
+    func testWebContentProcessTerminationDismissesNonModalInApp() {
+        let parameters = IterableHtmlMessageViewController.Parameters.createForTesting()
+        let viewController = IterableHtmlMessageViewController.create(parameters: parameters,
+                                                                      eventTracker: MockMessageViewControllerEventTracker(),
+                                                                      onClickCallback: nil)
+        let navigationController = RecordingNavigationController(rootViewController: viewController)
+
+        viewController.webViewWebContentProcessDidTerminate(WKWebView())
+
+        XCTAssertTrue(navigationController.didPopViewController)
+        XCTAssertEqual(navigationController.popAnimated, true)
+    }
+
+    func testCreateDismisserDismissesModalInApp() {
+        let nonInboxViewController = RecordingDismissViewController()
+        InAppCalculations.createDismisser(for: nonInboxViewController,
+                                          isModal: true,
+                                          isInboxMessage: false)()
+        XCTAssertEqual(nonInboxViewController.dismissAnimated, false)
+
+        let inboxViewController = RecordingDismissViewController()
+        InAppCalculations.createDismisser(for: inboxViewController,
+                                          isModal: true,
+                                          isInboxMessage: true)()
+        XCTAssertEqual(inboxViewController.dismissAnimated, true)
+    }
+
+    func testRenderFailureDismissDoesNotTrackInAppClose() {
+        var closeCount = 0
+        let eventTracker = MockMessageViewControllerEventTracker()
+        eventTracker.trackInAppCloseCallback = { _, _, _, _, _ in
+            closeCount += 1
+        }
+        let parameters = IterableHtmlMessageViewController.Parameters.createForTesting()
+        let viewController = IterableHtmlMessageViewController.create(parameters: parameters,
+                                                                      eventTracker: eventTracker,
+                                                                      onClickCallback: nil)
+
+        viewController.webViewWebContentProcessDidTerminate(WKWebView())
+        viewController.viewWillDisappear(false)
+
+        XCTAssertEqual(closeCount, 0)
+    }
+
+    func testDidFailLogsRenderFailure() {
+        let messageId = UUID().uuidString
+        let logDelegate = RecordingLogDelegate()
+        IterableLogUtil.sharedInstance = IterableLogUtil(dateProvider: MockDateProvider(), logDelegate: logDelegate)
+        let parameters = IterableHtmlMessageViewController.Parameters.createForTesting(messageId: messageId)
+        let viewController = IterableHtmlMessageViewController.create(parameters: parameters,
+                                                                      eventTracker: MockMessageViewControllerEventTracker(),
+                                                                      onClickCallback: nil)
+
+        viewController.webView(WKWebView(), didFail: nil, withError: Self.renderError)
+
+        let entry = logDelegate.entry(containing: "Unable to render in-app HTML for messageId: \(messageId), navigation failed with error:")
+        XCTAssertEqual(entry?.level, .error)
+        XCTAssertTrue(entry?.message.contains(Self.renderError.localizedDescription) == true)
+    }
+
+    func testDidFailProvisionalNavigationLogsRenderFailure() {
+        let messageId = UUID().uuidString
+        let logDelegate = RecordingLogDelegate()
+        IterableLogUtil.sharedInstance = IterableLogUtil(dateProvider: MockDateProvider(), logDelegate: logDelegate)
+        let parameters = IterableHtmlMessageViewController.Parameters.createForTesting(messageId: messageId)
+        let viewController = IterableHtmlMessageViewController.create(parameters: parameters,
+                                                                      eventTracker: MockMessageViewControllerEventTracker(),
+                                                                      onClickCallback: nil)
+
+        viewController.webView(WKWebView(), didFailProvisionalNavigation: nil, withError: Self.renderError)
+
+        let entry = logDelegate.entry(containing: "Unable to render in-app HTML for messageId: \(messageId), provisional navigation failed with error:")
+        XCTAssertEqual(entry?.level, .error)
+        XCTAssertTrue(entry?.message.contains(Self.renderError.localizedDescription) == true)
+    }
+
+    private static var renderError: NSError {
+        NSError(domain: "SDK490", code: 1, userInfo: [NSLocalizedDescriptionKey: "render failed"])
+    }
+
 }
 
 final class FakeNavigationAction: WKNavigationAction {
@@ -233,4 +606,41 @@ final class FakeNavigationAction: WKNavigationAction {
     }
     
     func decisionHandler(_ policy: WKNavigationActionPolicy) { self.receivedPolicy = policy }
+}
+
+final class RecordingNavigationController: UINavigationController {
+    var didPopViewController = false
+    var popAnimated: Bool?
+
+    override func popViewController(animated: Bool) -> UIViewController? {
+        didPopViewController = true
+        popAnimated = animated
+        return nil
+    }
+}
+
+final class RecordingDismissViewController: UIViewController {
+    var dismissAnimated: Bool?
+
+    override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
+        dismissAnimated = flag
+        completion?()
+    }
+}
+
+final class RecordingLogDelegate: NSObject, IterableLogDelegate {
+    struct Entry {
+        let level: LogLevel
+        let message: String
+    }
+
+    private(set) var entries = [Entry]()
+
+    func log(level: LogLevel, message: String) {
+        entries.append(Entry(level: level, message: message))
+    }
+
+    func entry(containing text: String) -> Entry? {
+        entries.first { $0.message.contains(text) }
+    }
 }

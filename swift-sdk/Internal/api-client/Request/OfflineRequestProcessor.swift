@@ -22,9 +22,15 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
         self.deviceMetadata = deviceMetadata
         self.taskScheduler = taskScheduler
         self.taskRunner = taskRunner
-        notificationListener = NotificationListener(notificationCenter: notificationCenter)
+        notificationListener = NotificationListener(notificationCenter: notificationCenter,
+                                                      authManager: authManager)
     }
     
+    var autoRetry: Bool {
+        get { taskRunner.autoRetry }
+        set { taskRunner.setAutoRetry(newValue) }
+    }
+
     func start() {
         ITBInfo()
         taskRunner.start()
@@ -34,7 +40,54 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
         ITBInfo()
         taskRunner.stop()
     }
-    
+
+    @discardableResult
+    func register(registerTokenInfo: RegisterTokenInfo,
+                  notificationsEnabled: Bool,
+                  onSuccess: OnSuccessHandler?,
+                  onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
+        let requestGenerator = { (requestCreator: RequestCreator) in
+            requestCreator.createRegisterTokenRequest(registerTokenInfo: registerTokenInfo,
+                                                      notificationsEnabled: notificationsEnabled)
+        }
+
+        return sendIterableRequest(requestGenerator: requestGenerator,
+                                   successHandler: onSuccess,
+                                   failureHandler: onFailure,
+                                   identifier: RequestIdentifier.registerToken)
+    }
+
+    @discardableResult
+    func disableDeviceForCurrentUser(hexToken: String,
+                                     identitySnapshot: UserIdentitySnapshot?,
+                                     withOnSuccess onSuccess: OnSuccessHandler?,
+                                     onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
+        let requestGenerator = { (requestCreator: RequestCreator) in
+            requestCreator.createDisableDeviceRequest(forAllUsers: false,
+                                                      hexToken: hexToken,
+                                                      identitySnapshot: identitySnapshot)
+        }
+
+        return sendIterableRequest(requestGenerator: requestGenerator,
+                                   successHandler: onSuccess,
+                                   failureHandler: onFailure,
+                                   identifier: RequestIdentifier.disableDevice)
+    }
+
+    @discardableResult
+    func disableDeviceForAllUsers(hexToken: String,
+                                  withOnSuccess onSuccess: OnSuccessHandler?,
+                                  onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
+        let requestGenerator = { (requestCreator: RequestCreator) in
+            requestCreator.createDisableDeviceRequest(forAllUsers: true, hexToken: hexToken)
+        }
+
+        return sendIterableRequest(requestGenerator: requestGenerator,
+                                   successHandler: onSuccess,
+                                   failureHandler: onFailure,
+                                   identifier: RequestIdentifier.disableDevice)
+    }
+
     @discardableResult
     func updateCart(items: [CommerceItem],
                     onSuccess: OnSuccessHandler?,
@@ -43,6 +96,21 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
             requestCreator.createUpdateCartRequest(items: items)
         }
         
+        return sendIterableRequest(requestGenerator: requestGenerator,
+                                   successHandler: onSuccess,
+                                   failureHandler: onFailure,
+                                   identifier: #function)
+    }
+    
+    @discardableResult
+    func updateCart(items: [CommerceItem],
+                    createdAt: Int,
+                    onSuccess: OnSuccessHandler?,
+                    onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
+        let requestGenerator = { (requestCreator: RequestCreator) in
+            requestCreator.createUpdateCartRequest(items: items, createdAt: createdAt)
+        }
+
         return sendIterableRequest(requestGenerator: requestGenerator,
                                    successHandler: onSuccess,
                                    failureHandler: onFailure,
@@ -65,6 +133,26 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
                                                       templateId: templateId)
         }
         
+        return sendIterableRequest(requestGenerator: requestGenerator,
+                                   successHandler: onSuccess,
+                                   failureHandler: onFailure,
+                                   identifier: #function)
+    }
+    
+    @discardableResult
+    func trackPurchase(_ total: NSNumber,
+                       items: [CommerceItem],
+                       dataFields: [AnyHashable: Any]?,
+                       createdAt: Int,
+                       onSuccess: OnSuccessHandler?,
+                       onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
+        let requestGenerator = { (requestCreator: RequestCreator) in
+            requestCreator.createTrackPurchaseRequest(total,
+                                                      items: items,
+                                                      dataFields: dataFields,
+                                                      createdAt: createdAt)
+        }
+
         return sendIterableRequest(requestGenerator: requestGenerator,
                                    successHandler: onSuccess,
                                    failureHandler: onFailure,
@@ -102,6 +190,23 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
         let requestGenerator = { (requestCreator: RequestCreator) in
             requestCreator.createTrackEventRequest(event,
                                                    dataFields: dataFields)
+        }
+
+        return sendIterableRequest(requestGenerator: requestGenerator,
+                                   successHandler: onSuccess,
+                                   failureHandler: onFailure,
+                                   identifier: #function)
+    }
+    
+    @discardableResult
+    func track(event: String,
+               withBody body: [AnyHashable: Any]?,
+               onSuccess: OnSuccessHandler? = nil,
+               onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
+        ITBInfo()
+        let requestGenerator = { (requestCreator: RequestCreator) in
+            requestCreator.createTrackEventRequest(event,
+                                                   withBody: body)
         }
 
         return sendIterableRequest(requestGenerator: requestGenerator,
@@ -260,34 +365,6 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
     }
     
     @discardableResult
-    func track(embeddedMessageDismiss message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler? = nil,
-               onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
-        let requestGenerator = { (requestCreator: RequestCreator) in
-            requestCreator.createEmbeddedMessageDismissRequest(message)
-        }
-        
-        return sendIterableRequest(requestGenerator: requestGenerator,
-                                   successHandler: onSuccess,
-                                   failureHandler: onFailure,
-                                   identifier: #function)
-    }
-    
-    @discardableResult
-    func track(embeddedMessageImpression message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler?,
-               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
-        let requestGenerator = { (requestCreator: RequestCreator) in
-            requestCreator.createEmbeddedMessageImpressionRequest(message)
-        }
-        
-        return sendIterableRequest(requestGenerator: requestGenerator,
-                                   successHandler: onSuccess,
-                                   failureHandler: onFailure,
-                                   identifier: #function)
-    }
-    
-    @discardableResult
     func track(embeddedSession: IterableEmbeddedSession,
                onSuccess: OnSuccessHandler?,
                onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
@@ -304,6 +381,11 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
     func deleteAllTasks() {
         ITBInfo()
         taskScheduler.deleteAllTasks()
+    }
+
+    func deleteAllTasks(preservingTasksWithName preservedName: String) {
+        ITBInfo()
+        taskScheduler.deleteAllTasks(preservingTasksWithName: preservedName)
     }
     
     private let apiKey: String
@@ -354,9 +436,16 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
                     authManager?.setIsLastAuthTokenValid(false)
                     let retryInterval = authManager?.getNextRetryInterval() ?? 1
                     DispatchQueue.main.async {
-                        authManager?.scheduleAuthTokenRefreshTimer(interval: retryInterval, isScheduledRefresh: false, successCallback: { _ in
-                            _ = sendIterableRequest(requestGenerator: requestGenerator, successHandler: onSuccess, failureHandler: onFailure, identifier: identifier)
-                        })
+                        authManager?.scheduleAuthTokenRefreshTimer(
+                            interval: retryInterval,
+                            isScheduledRefresh: false,
+                            successCallback: { _ in
+                                _ = sendIterableRequest(requestGenerator: requestGenerator, successHandler: onSuccess, failureHandler: onFailure, identifier: identifier)
+                            },
+                            onRetryExhausted: {
+                                onFailure?(error.reason, error.data)
+                            }
+                        )
                     }
 
                 }
@@ -366,9 +455,11 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
     }
 
     private class NotificationListener: NSObject {
-        init(notificationCenter: NotificationCenterProtocol) {
+        init(notificationCenter: NotificationCenterProtocol,
+             authManager: IterableAuthManagerProtocol? = nil) {
             ITBInfo("OfflineRequestProcessor.NotificationListener.init()")
             self.notificationCenter = notificationCenter
+            self.authManager = authManager
             super.init()
             self.notificationCenter.addObserver(self,
                                                 selector: #selector(onTaskFinishedWithSuccess(notification:)),
@@ -376,6 +467,9 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
             self.notificationCenter.addObserver(self,
                                                 selector: #selector(onTaskFinishedWithNoRetry(notification:)),
                                                 name: .iterableTaskFinishedWithNoRetry, object: nil)
+            self.notificationCenter.addObserver(self,
+                                                selector: #selector(onTaskFinishedWithRetry(notification:)),
+                                                name: .iterableTaskFinishedWithRetry, object: nil)
         }
         
         deinit {
@@ -405,6 +499,18 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
                 rejectTask(error: taskSendRequestError)
             } else {
                 ITBError("Could not find taskId for notification")
+            }
+        }
+
+        @objc
+        private func onTaskFinishedWithRetry(notification: Notification) {
+            ITBInfo()
+            if let taskSendRequestError = IterableNotificationUtil.notificationToTaskSendRequestError(notification) {
+                let error = taskSendRequestError.sendRequestError
+                if error.httpStatusCode == 401, RequestProcessorUtil.matchesJWTErrorCode(error.iterableCode) {
+                    ITBInfo("JWT auth failure in offline task, invalidating auth token state")
+                    authManager?.setIsLastAuthTokenValid(false)
+                }
             }
         }
         
@@ -444,6 +550,7 @@ struct OfflineRequestProcessor: RequestProcessorProtocol {
         }
 
         private let notificationCenter: NotificationCenterProtocol
+        private weak var authManager: IterableAuthManagerProtocol?
         private var pendingTasksMap = [String: Fulfill<SendRequestValue, SendRequestError>]()
         private var pendingTasksQueue = DispatchQueue(label: "pendingTasks")
     }

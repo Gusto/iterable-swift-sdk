@@ -37,10 +37,11 @@ struct InAppCalculations {
                                                                 location: input.location,
                                                                 safeAreaInsets: input.safeAreaInsets)
             let startAlpha = calculateAnimationStartAlpha(location: input.location)
-            
+
+            let initialBgColor: UIColor = (input.location == .full) ? (input.backgroundColor ?? .clear) : .clear
             let initialParam = AnimationParam(position: startPosition,
                                               alpha: startAlpha,
-                                              bgColor: UIColor.clear)
+                                              bgColor: initialBgColor)
             let finalBgColor = finalViewBackgroundColor(bgColor: input.backgroundColor, isModal: input.isModal)
             let finalParam = AnimationParam(position: input.position,
                                             alpha: 1.0,
@@ -48,7 +49,8 @@ struct InAppCalculations {
             return AnimationDetail(initial: initialParam,
                                    final: finalParam)
         } else if let bgColor = input.backgroundColor {
-            return AnimationDetail(initial: AnimationParam(position: input.position, alpha: 1.0, bgColor: UIColor.clear),
+            let initialBgColor: UIColor = (input.location == .full) ? bgColor : .clear
+            return AnimationDetail(initial: AnimationParam(position: input.position, alpha: 1.0, bgColor: initialBgColor),
                                    final: AnimationParam(position: input.position, alpha: 1.0, bgColor: bgColor))
         } else {
             return nil
@@ -109,14 +111,15 @@ struct InAppCalculations {
         position.height = inAppHeight
         
         // now set the width
+        let availableWidth = parentPosition.width - safeAreaInsets.left - safeAreaInsets.right
         let notificationWidth = 100 - (paddingLeft + paddingRight)
-        position.width = parentPosition.width * notificationWidth / 100
+        position.width = availableWidth * notificationWidth / 100
         
         // Position webview
         position.center = parentPosition.center
         
         // set center x
-        position.center.x = parentPosition.width * (paddingLeft + notificationWidth / 2) / 100
+        position.center.x = safeAreaInsets.left + availableWidth * (paddingLeft + notificationWidth / 2) / 100
         
         // set center y
         switch location {
@@ -125,9 +128,14 @@ struct InAppCalculations {
             let halfWebViewHeight = position.height / 2
             position.center.y = halfWebViewHeight
         case .bottom:
+            position.height = position.height + safeAreaInsets.bottom
             let halfWebViewHeight = position.height / 2
-            position.center.y = parentPosition.height - halfWebViewHeight - safeAreaInsets.bottom
-        default: break
+            position.center.y = parentPosition.height - halfWebViewHeight
+        case .center:
+            let availableHeight = parentPosition.height - safeAreaInsets.top - safeAreaInsets.bottom
+            position.center.y = safeAreaInsets.top + availableHeight / 2
+        case .full:
+            break
         }
         
         return position
@@ -139,7 +147,7 @@ struct InAppCalculations {
                 viewController?.navigationController?.popViewController(animated: true)
             }
         }
-        
+
         return { [weak viewController] in
             viewController?.dismiss(animated: isInboxMessage)
         }

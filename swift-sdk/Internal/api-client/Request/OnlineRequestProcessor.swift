@@ -22,34 +22,41 @@ struct OnlineRequestProcessor: RequestProcessorProtocol {
                               dateProvider: dateProvider)
     }
     
+    @discardableResult
     func register(registerTokenInfo: RegisterTokenInfo,
-                  notificationStateProvider: NotificationStateProviderProtocol,
+                  notificationsEnabled: Bool,
                   onSuccess: OnSuccessHandler? = nil,
-                  onFailure: OnFailureHandler? = nil) {
-        notificationStateProvider.isNotificationsEnabled { enabled in
-            self.register(registerTokenInfo: registerTokenInfo,
-                          notificationsEnabled: enabled,
-                          onSuccess: onSuccess,
-                          onFailure: onFailure)
-        }
+                  onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
+        sendRequest(requestProvider: { apiClient.register(registerTokenInfo: registerTokenInfo,
+                                                          notificationsEnabled: notificationsEnabled) },
+                    successHandler: onSuccess,
+                    failureHandler: onFailure,
+                    requestIdentifier: RequestIdentifier.registerToken)
     }
-    
+
     @discardableResult
     func disableDeviceForCurrentUser(hexToken: String,
+                                     identitySnapshot: UserIdentitySnapshot?,
                                      withOnSuccess onSuccess: OnSuccessHandler? = nil,
                                      onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
+        // Honor the caller-captured snapshot so the online fallback (when
+        // `HealthMonitor.canSchedule()` returns false) still targets the user who was
+        // current at call time — not whoever live `auth` points to after the deferred
+        // dispatch resolves.
         disableDevice(forAllUsers: false,
                       hexToken: hexToken,
+                      identitySnapshot: identitySnapshot,
                       onSuccess: onSuccess,
                       onFailure: onFailure)
     }
-    
+
     @discardableResult
     func disableDeviceForAllUsers(hexToken: String,
                                   withOnSuccess onSuccess: OnSuccessHandler? = nil,
                                   onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
         disableDevice(forAllUsers: true,
                       hexToken: hexToken,
+                      identitySnapshot: nil,
                       onSuccess: onSuccess,
                       onFailure: onFailure)
     }
@@ -86,6 +93,17 @@ struct OnlineRequestProcessor: RequestProcessorProtocol {
     }
     
     @discardableResult
+    func updateCart(items: [CommerceItem],
+                    createdAt: Int,
+                    onSuccess: OnSuccessHandler? = nil,
+                    onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
+        sendRequest(requestProvider: { apiClient.updateCart(items: items, createdAt: createdAt) },
+                    successHandler: onSuccess,
+                    failureHandler: onFailure,
+                    requestIdentifier: "updateCart")
+    }
+    
+    @discardableResult
     func trackPurchase(_ total: NSNumber,
                        items: [CommerceItem],
                        dataFields: [AnyHashable: Any]? = nil,
@@ -98,6 +116,16 @@ struct OnlineRequestProcessor: RequestProcessorProtocol {
                                                        dataFields: dataFields,
                                                        campaignId: campaignId,
                                                        templateId: templateId) },
+                    successHandler: onSuccess,
+                    failureHandler: onFailure,
+                    requestIdentifier: "trackPurchase")
+    }
+    
+    func trackPurchase(_ total: NSNumber, items: [CommerceItem], dataFields: [AnyHashable : Any]?, createdAt: Int, onSuccess: OnSuccessHandler?, onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
+        sendRequest(requestProvider: { apiClient.track(purchase: total,
+                                                       items: items,
+                                                       dataFields: dataFields,
+                                                       createdAt: createdAt)},
                     successHandler: onSuccess,
                     failureHandler: onFailure,
                     requestIdentifier: "trackPurchase")
@@ -127,6 +155,17 @@ struct OnlineRequestProcessor: RequestProcessorProtocol {
                onSuccess: OnSuccessHandler? = nil,
                onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
         sendRequest(requestProvider: { apiClient.track(event: event, dataFields: dataFields) },
+                    successHandler: onSuccess,
+                    failureHandler: onFailure,
+                    requestIdentifier: "trackEvent")
+    }
+    
+    @discardableResult
+    func track(event: String,
+               withBody body: [AnyHashable: Any]? = nil,
+               onSuccess: OnSuccessHandler? = nil,
+               onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
+        sendRequest(requestProvider: { apiClient.track(event: event, withBody: body) },
                     successHandler: onSuccess,
                     failureHandler: onFailure,
                     requestIdentifier: "trackEvent")
@@ -254,26 +293,6 @@ struct OnlineRequestProcessor: RequestProcessorProtocol {
     }
     
     @discardableResult
-    func track(embeddedMessageDismiss message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler? = nil,
-               onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
-        sendRequest(requestProvider: { apiClient.track(embeddedMessageDismiss: message) },
-                    successHandler: onSuccess,
-                    failureHandler: onFailure,
-                    requestIdentifier: "trackEmbeddedMessageDismiss")
-    }
-    
-    @discardableResult
-    func track(embeddedMessageImpression message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler?,
-               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError> {
-        sendRequest(requestProvider: { apiClient.track(embeddedMessageImpression: message) },
-                    successHandler: onSuccess,
-                    failureHandler: onFailure,
-                    requestIdentifier: "trackEmbeddedMessageImpression")
-    }
-    
-    @discardableResult
     func track(embeddedSession: IterableEmbeddedSession,
                onSuccess: OnSuccessHandler? = nil,
                onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
@@ -291,26 +310,17 @@ struct OnlineRequestProcessor: RequestProcessorProtocol {
     private weak var authManager: IterableAuthManagerProtocol?
     
     @discardableResult
-    private func register(registerTokenInfo: RegisterTokenInfo,
-                          notificationsEnabled: Bool,
-                          onSuccess: OnSuccessHandler? = nil,
-                          onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
-        sendRequest(requestProvider: { apiClient.register(registerTokenInfo: registerTokenInfo,
-                                                          notificationsEnabled: notificationsEnabled) },
-                    successHandler: onSuccess,
-                    failureHandler: onFailure,
-                    requestIdentifier: "registerToken")
-    }
-    
-    @discardableResult
     private func disableDevice(forAllUsers allUsers: Bool,
                                hexToken: String,
+                               identitySnapshot: UserIdentitySnapshot?,
                                onSuccess: OnSuccessHandler? = nil,
                                onFailure: OnFailureHandler? = nil) -> Pending<SendRequestValue, SendRequestError> {
-        sendRequest(requestProvider: { apiClient.disableDevice(forAllUsers: allUsers, hexToken: hexToken) },
+        sendRequest(requestProvider: { apiClient.disableDevice(forAllUsers: allUsers,
+                                                               hexToken: hexToken,
+                                                               identitySnapshot: identitySnapshot) },
                     successHandler: onSuccess,
                     failureHandler: onFailure,
-                    requestIdentifier: "disableDevice")
+                    requestIdentifier: RequestIdentifier.disableDevice)
     }
 
     private func sendRequest(requestProvider: @escaping () -> Pending<SendRequestValue, SendRequestError>,

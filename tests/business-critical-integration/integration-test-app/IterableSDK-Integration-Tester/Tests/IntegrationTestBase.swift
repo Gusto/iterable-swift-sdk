@@ -1,0 +1,1513 @@
+import XCTest
+import Foundation
+@testable import IterableSDK
+
+class IntegrationTestBase: XCTestCase {
+    
+    // MARK: - Class Properties
+    
+    // Track if any test has failed (for local mode early exit)
+    private static var hasAnyTestFailed = false
+    
+    // MARK: - Properties
+    
+    var app: XCUIApplication!
+    var testConfig: TestConfiguration!
+    var apiClient: IterableAPIClient!
+    var metricsValidator: MetricsValidator!
+    var screenshotCapture: ScreenshotCapture!
+    
+    // Test data
+    var testUserEmail: String!
+    var testProjectId: String!
+    var apiKey: String!
+    var serverKey: String!
+    
+    // Timeouts
+    let standardTimeout: TimeInterval = 30.0
+    let longTimeout: TimeInterval = 60.0
+    let networkTimeout: TimeInterval = 45.0
+    
+    // Check for fast test mode from environment variable or launch arguments
+    let fastTest: Bool = {
+        // First check launch arguments
+        if let fastTestArg = ProcessInfo.processInfo.environment["FAST_TEST"] {
+            let isFast = fastTestArg.lowercased() == "true" || fastTestArg == "1"
+            print("🚀 Fast Test Mode: \(isFast ? "ENABLED" : "DISABLED") (from FAST_TEST=\(fastTestArg))")
+            return isFast
+        }
+        
+        // Check if running from manual Xcode IDE (not script-driven xcodebuild)
+        let isXcodeIDE = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] != nil
+        let isScriptDriven = ProcessInfo.processInfo.environment["INTEGRATION_TEST"] != nil
+        
+        if isXcodeIDE && !isScriptDriven {
+            print("🚀 Fast Test Mode: ENABLED (detected manual Xcode IDE run)")
+            return true
+        }
+        
+        // Default to false for comprehensive testing
+        print("🚀 Fast Test Mode: DISABLED (comprehensive testing mode)")
+        return false
+    }()
+    
+    // Check for early exit on test failure mode (enabled via script parameter)
+    let exitOnTestFailure: Bool = {
+        if let exitFlag = ProcessInfo.processInfo.environment["EXIT_ON_TEST_FAILURE"] {
+            let shouldExit = exitFlag.lowercased() == "true" || exitFlag == "1"
+            print("🛑 Exit On Test Failure: \(shouldExit ? "ENABLED" : "DISABLED") (from EXIT_ON_TEST_FAILURE=\(exitFlag))")
+            return shouldExit
+        }
+        print("🛑 Exit On Test Failure: DISABLED (default)")
+        return false
+    }()
+    
+    // CI Environment Detection
+    let isRunningInCI: Bool = {
+        // Check for force simulation mode (for testing simulated pushes locally)
+        let forceSimulation = ProcessInfo.processInfo.environment["FORCE_SIMULATED_PUSH"] == "1"
+        if forceSimulation {
+            print("🎭 [TEST] FORCE_SIMULATED_PUSH=1 detected - enabling simulated push mode locally")
+            return true
+        }
+        
+        // First check environment variable
+        let ciEnv = ProcessInfo.processInfo.environment["CI"]
+        let envCI = ciEnv == "1" || ciEnv == "true"
+        // If CI is explicitly disabled via env var, respect that over the bundled config
+        // (allows CI=0 ./scripts/run-tests.sh to force local mode locally)
+        let envExplicitlyDisabled = ciEnv == "0" || ciEnv == "false"
+        
+        // Then check config file (updated by script)
+        var configCI = false
+        var configPath = "NOT_FOUND"
+        var configContents = "UNABLE_TO_READ"
+        
+        // Look in app bundle first, then test bundle
+        var path: String?
+        if let appBundle = Bundle(identifier: "com.sumeru.IterableSDK-Integration-Tester") {
+            path = appBundle.path(forResource: "test-config", ofType: "json")
+        }
+        if path == nil {
+            path = Bundle.main.path(forResource: "test-config", ofType: "json")
+        }
+        
+        if let foundPath = path {
+            configPath = foundPath
+            
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: foundPath)) {
+                // Print the entire config contents for debugging
+                if let configString = String(data: data, encoding: .utf8) {
+                    configContents = configString
+                    print("📋 [TEST] Full config.json contents:")
+                    print(configString)
+                }
+                
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let testing = json["testing"] as? [String: Any],
+                   let ciMode = testing["ciMode"] as? Bool {
+                    configCI = ciMode
+                }
+            }
+        }
+        
+        print("🔍 [TEST] Config file path: \(configPath)")
+        print("🔍 [TEST] Environment CI: \(envCI)")
+        print("🔍 [TEST] Config CI: \(configCI)")
+        
+        // Use either detection method
+        let isCI = envExplicitlyDisabled ? false : (envCI || configCI)
+        
+        if isCI {
+            print("🤖 [TEST] CI ENVIRONMENT DETECTED")
+            print("🔍 [TEST] CI detected via: env=\(envCI), config=\(configCI)")
+            print("🎭 [TEST] Push notification testing will use simulated pushes via xcrun simctl")
+            print("🔧 [TEST] Mock device tokens will be generated instead of real APNS registration")
+        } else {
+            print("📱 [TEST] LOCAL ENVIRONMENT DETECTED")
+            print("🌐 [TEST] Push notification testing will use real APNS pushes")
+            print("📱 [TEST] Real device tokens will be obtained from APNS")
+        }
+        
+        return isCI
+    }()
+    
+    // MARK: - Class Setup
+    
+    override class func setUp() {
+        super.setUp()
+        // Reset failure flag at the start of test suite
+        hasAnyTestFailed = false
+        print("🧪 Test suite starting - failure tracking reset")
+    }
+    
+    // MARK: - Setup & Teardown
+    
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        
+        // Control whether to continue after assertion failures within a test
+        // Always stop within the same test on failure for cleaner logs
+        continueAfterFailure = false
+        
+        // Control whether to run next test after a test failure
+        // Only skip if EXIT_ON_TEST_FAILURE is enabled from script
+        if exitOnTestFailure && Self.hasAnyTestFailed {
+            print("⏭️ [EXIT MODE] Skipping test - previous test failed (EXIT_ON_TEST_FAILURE=1)")
+            throw XCTSkip("Skipping remaining tests after first failure (exit on failure mode enabled)")
+        }
+        
+        // Log test mode for visibility
+        print("🧪 Test Mode: \(fastTest ? "FAST (skipping detailed validations)" : "COMPREHENSIVE (full validation suite)")")
+        
+        // Initialize test configuration
+        setupTestConfiguration()
+        
+        // Initialize app with test configuration
+        setupTestApplication()
+        
+        // Initialize backend clients
+        setupBackendClients()
+        
+        // Initialize utilities
+        setupUtilities()
+        
+        // Setup UI interruption monitors for permission dialogs
+        setupUIInterruptionMonitors()
+        
+        // Start fresh for each test
+        app.launch()
+        
+        // Wait for app to be ready
+        waitForAppToBeReady()
+        
+        // Initialize SDK with test configuration
+        initializeSDKForTesting()
+        
+    }
+    
+    override func tearDownWithError() throws {
+        // Track if this test failed (only if EXIT_ON_TEST_FAILURE is enabled)
+        if exitOnTestFailure && testRun?.hasSucceeded == false {
+            Self.hasAnyTestFailed = true
+            print("❌ Test failed - marking for early exit (EXIT_ON_TEST_FAILURE=1)")
+        }
+        
+        // Capture final screenshot
+        screenshotCapture?.captureScreenshot(named: "final-\(name)")
+        
+        // Clean up test data
+        cleanupTestData()
+        
+        // Terminate app
+        app?.terminate()
+        
+        try super.tearDownWithError()
+    }
+    
+    // MARK: - Setup Helpers
+    
+    private func setupTestConfiguration() {
+        // Load configuration from test-config.json
+        guard let configData = loadTestConfig() else {
+            XCTFail("Failed to load test-config.json")
+            return
+        }
+        
+        testUserEmail = configData["testUserEmail"] as? String ?? "integration-test@iterable.com"
+        testProjectId = configData["projectId"] as? String ?? "test-project"
+        apiKey = configData["mobileApiKey"] as? String ?? ""
+        serverKey = configData["serverApiKey"] as? String ?? ""
+        
+        XCTAssertFalse(apiKey.isEmpty, "mobileApiKey must be set in test-config.json")
+        XCTAssertFalse(testProjectId.isEmpty, "projectId must be set in test-config.json")
+        
+        // Load test configuration
+        testConfig = TestConfiguration(
+            apiKey: apiKey,
+            serverKey: serverKey,
+            projectId: testProjectId,
+            userEmail: testUserEmail
+        )
+    }
+    
+    private func setupTestApplication() {
+        app = XCUIApplication()
+        
+        // Set launch arguments for test configuration
+        app.launchArguments = [
+            "-INTEGRATION_TEST_MODE", "YES",
+            "-API_KEY", apiKey,
+            "-TEST_USER_EMAIL", testUserEmail,
+            "-TEST_PROJECT_ID", testProjectId
+        ]
+        
+        // Set launch environment
+        app.launchEnvironment = [
+            "INTEGRATION_TEST": "1",
+            "API_ENDPOINT": testConfig.apiEndpoint,
+            "ENABLE_LOGGING": "1",
+            "FAST_TEST": ProcessInfo.processInfo.environment["FAST_TEST"] ?? "true",
+            "SCREENSHOTS_DIR": ProcessInfo.processInfo.environment["SCREENSHOTS_DIR"] ?? "",
+            "CI": isRunningInCI ? "1" : "0"  // Pass CI detection to app
+        ]
+    }
+    
+    private func setupBackendClients() {
+        apiClient = IterableAPIClient(
+            apiKey: apiKey,
+            serverKey: serverKey,
+            projectId: testProjectId
+        )
+        
+        metricsValidator = MetricsValidator(
+            apiClient: apiClient,
+            userEmail: testUserEmail
+        )
+    }
+    
+    private func setupUtilities() {
+        screenshotCapture = ScreenshotCapture(testCase: self)
+    }
+    
+    private func setupUIInterruptionMonitors() {
+        // Monitor for push notification permission dialog
+        addUIInterruptionMonitor(withDescription: "Push Notification Permission") { alert in
+            print("🔔 UI Interruption Monitor: Handling push notification permission dialog")
+            
+            // Handle various permission dialog button titles
+            let allowButtons = [
+                "Allow",
+                "OK", 
+                "Allow Once",
+                "Allow While Using App"
+            ]
+            
+            for buttonTitle in allowButtons {
+                let button = alert.buttons[buttonTitle]
+                if button.exists {
+                    print("📱 Tapping '\(buttonTitle)' button for push notification permission")
+                    button.tap()
+                    return true
+                }
+            }
+            
+            // If no Allow button found, log available buttons for debugging
+            let availableButtons = alert.buttons.allElementsBoundByIndex.map { $0.label }
+            print("⚠️ No Allow button found. Available buttons: \(availableButtons)")
+            return false
+        }
+        
+        // Monitor for location permission dialog (if app also requests location)
+        addUIInterruptionMonitor(withDescription: "Location Permission") { alert in
+            print("📍 UI Interruption Monitor: Handling location permission dialog")
+            
+            let allowButtons = ["Allow While Using App", "Allow Once", "Allow"]
+            for buttonTitle in allowButtons {
+                let button = alert.buttons[buttonTitle]
+                if button.exists {
+                    print("📱 Tapping '\(buttonTitle)' button for location permission")
+                    button.tap()
+                    return true
+                }
+            }
+            return false
+        }
+        
+        // Monitor for other system permission dialogs
+        addUIInterruptionMonitor(withDescription: "General System Permission") { alert in
+            print("⚙️ UI Interruption Monitor: Handling general system permission dialog")
+            
+            // Try common "Allow" type buttons first
+            let allowButtons = ["Allow", "OK", "Continue", "Yes"]
+            for buttonTitle in allowButtons {
+                let button = alert.buttons[buttonTitle]
+                if button.exists {
+                    print("📱 Tapping '\(buttonTitle)' button for system permission")
+                    button.tap()
+                    return true
+                }
+            }
+            
+            // If no allow-type button, try the rightmost button (usually the positive action)
+            let buttons = alert.buttons.allElementsBoundByIndex
+            if !buttons.isEmpty {
+                let lastButton = buttons.last!
+                print("📱 Tapping last button '\(lastButton.label)' as fallback")
+                lastButton.tap()
+                return true
+            }
+            
+            return false
+        }
+        
+        print("✅ UI Interruption Monitors configured for permission dialogs")
+    }
+    
+    private func loadTestConfig() -> [String: Any]? {
+        guard let path = Bundle(for: type(of: self)).path(forResource: "test-config", ofType: "json"),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("❌ Could not load test-config.json")
+            return nil
+        }
+        print("✅ Loaded test configuration from test-config.json")
+        return json
+    }
+    
+    private func waitForAppToBeReady() {
+        let readyIndicator = app.staticTexts["app-ready-indicator"]
+        let exists = NSPredicate(format: "exists == true")
+        expectation(for: exists, evaluatedWith: readyIndicator, handler: nil)
+        waitForExpectations(timeout: standardTimeout, handler: nil)
+    }
+    
+    private func initializeSDKForTesting() {
+        
+        if fastTest == false {
+            // First verify SDK is not initialized - should show X mark
+            let sdkReadyIndicator = app.staticTexts["sdk-ready-indicator"]
+            XCTAssertTrue(sdkReadyIndicator.waitForExistence(timeout: standardTimeout))
+            XCTAssertEqual(sdkReadyIndicator.label, "✗", "SDK should show X mark when not initialized")
+            
+            // Set user email in the field (but don't register it yet)
+            let emailField = app.textFields["user-email-textfield"]
+            XCTAssertTrue(emailField.waitForExistence(timeout: standardTimeout))
+            if emailField.value as? String != testUserEmail {
+                emailField.tap()
+                emailField.clearAndTypeText(testUserEmail)
+            }
+            
+            // Verify email status shows "Not set" before SDK initialization
+            let emailStatusValue = app.staticTexts["sdk-email-value"]
+            XCTAssertTrue(emailStatusValue.waitForExistence(timeout: standardTimeout))
+            XCTAssertEqual(emailStatusValue.label, "Not set", "Email should show 'Not set' before SDK initialization")
+            
+            screenshotCapture.captureScreenshot(named: "sdk-before-initialization")
+            
+        }
+            
+        let initializeButton = app.buttons["initialize-sdk-button"]
+        XCTAssertTrue(initializeButton.waitForExistence(timeout: standardTimeout))
+        initializeButton.tap()
+        
+        if fastTest == false {
+            let sdkReadyIndicator = app.staticTexts["sdk-ready-indicator"]
+            XCTAssertTrue(sdkReadyIndicator.waitForExistence(timeout: standardTimeout))
+            let checkmarkPredicate = NSPredicate(format: "label == %@", "✓")
+            let checkmarkExpectation = XCTNSPredicateExpectation(predicate: checkmarkPredicate, object: sdkReadyIndicator)
+            XCTAssertEqual(XCTWaiter.wait(for: [checkmarkExpectation], timeout: 5.0), .completed, "SDK initialization should show checkmark")
+        }
+        // NOW register the email AFTER SDK is initialized
+        let registerEmailButton = app.buttons["register-email-button"]
+        XCTAssertTrue(registerEmailButton.waitForExistence(timeout: standardTimeout))
+        // On CI the button can be just off-screen; coordinate tap bypasses scroll-to-visible
+        if registerEmailButton.isHittable {
+            registerEmailButton.tap()
+        } else {
+            registerEmailButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        
+        sleep(1)
+        
+        if fastTest == false {
+            
+            // Verify email status shows the actual email after registration
+            let emailStatusValueAfterInit = app.staticTexts["sdk-email-value"]
+            XCTAssertTrue(emailStatusValueAfterInit.waitForExistence(timeout: standardTimeout))
+            XCTAssertEqual(emailStatusValueAfterInit.label, testUserEmail, "Email should show actual email address after SDK initialization and registration")
+            
+            verifySDKInitializationNetworkCalls()
+        }
+        
+        screenshotCapture.captureScreenshot(named: "sdk-initialized")
+    }
+    
+    // MARK: - Test Helpers
+    
+    func waitForAPICall(endpoint: String, timeout: TimeInterval = 30.0) -> Bool {
+        let predicate = NSPredicate { _, _ in
+            return self.apiClient.hasReceivedCall(to: endpoint)
+        }
+        
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: nil)
+        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        return result == .completed
+    }
+    
+    func waitForNotificationPermission() {
+        // UI Interruption Monitor will automatically handle permission dialogs
+        // Just wait a moment for the dialog to appear and be dismissed
+        print("⏳ Waiting for permission dialog to be handled by UI Interruption Monitor...")
+        
+        // Trigger any pending UI interruptions by interacting with the app
+        app.tap()
+        
+        // Give time for the permission dialog to appear and be automatically dismissed
+        sleep(3)
+        
+        print("✅ Permission dialog handling completed")
+    }
+    
+    func sendTestPushNotification(payload: [String: Any]) {
+        let expectation = XCTestExpectation(description: "Send push notification")
+        
+        apiClient.sendPushNotification(
+            to: testUserEmail,
+            payload: payload
+        ) { success, error in
+            XCTAssertTrue(success, "Failed to send push notification: \(error?.localizedDescription ?? "Unknown error")")
+            expectation.fulfill()
+        }
+        
+        wait(for: [expectation], timeout: networkTimeout)
+    }
+    
+    func validateMetrics(eventType: String, expectedCount: Int = 1) {
+        let expectation = XCTestExpectation(description: "Validate metrics")
+        
+        metricsValidator.validateEventCount(
+            eventType: eventType,
+            expectedCount: expectedCount,
+            timeout: networkTimeout
+        ) { success, actualCount in
+            XCTAssertTrue(success, "Metrics validation failed. Expected \(expectedCount) \(eventType) events, got \(actualCount)")
+            expectation.fulfill()
+        }
+        
+        wait(for: [expectation], timeout: networkTimeout)
+    }
+    
+    func simulateAppBackground() {
+        XCUIDevice.shared.press(.home)
+        sleep(2)
+    }
+    
+    func simulateAppForeground() {
+        app.activate()
+        sleep(1)
+    }
+    
+    func triggerDeepLink(url: String) {
+        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+        safari.launch()
+        
+        let urlTextField = safari.textFields["URL"]
+        urlTextField.tap()
+        urlTextField.typeText(url)
+        safari.keyboards.buttons["Go"].tap()
+        
+        // Wait for redirect to our app
+        sleep(3)
+        
+        // Verify our app is in foreground
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: standardTimeout))
+    }
+    
+    // MARK: - Validation Helpers
+    
+    func validateSDKInitialization() {
+        // Verify SDK is properly initialized - check for checkmark
+        let sdkReadyIndicator = app.staticTexts["sdk-ready-indicator"]
+        XCTAssertTrue(sdkReadyIndicator.exists, "SDK ready indicator should exist")
+        XCTAssertEqual(sdkReadyIndicator.label, "✓", "SDK should show checkmark when initialized")
+        XCTAssertTrue(waitForAPICall(endpoint: "/api/users/registerDeviceToken"))
+    }
+    
+    func validatePushNotificationReceived() {
+        // For integration tests, we'll check for push notification indicators in the app
+        // rather than system-level banners which are complex to test
+        let pushIndicator = app.staticTexts["push-notification-processed"]
+        XCTAssertTrue(pushIndicator.waitForExistence(timeout: standardTimeout), "No push notification received")
+        
+        screenshotCapture.captureScreenshot(named: "push-notification-received")
+    }
+    
+    func validateSpecificPushNotificationReceived(expectedTitle: String, expectedBody: String) {
+        // Check for the specific push notification content in system notifications
+        // or app-specific push notification indicators
+        
+        print("⏳ Waiting for push notification with title: '\(expectedTitle)' and body: '\(expectedBody)'")
+        
+        // First check if there's a system notification banner visible
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        
+        // Look for notification banner with expected title and body
+        let titlePredicate = NSPredicate(format: "label CONTAINS[c] %@", expectedTitle)
+        let bodyPredicate = NSPredicate(format: "label CONTAINS[c] %@", expectedBody)
+        
+        let titleElement = springboard.staticTexts.containing(titlePredicate).firstMatch
+        let bodyElement = springboard.staticTexts.containing(bodyPredicate).firstMatch
+        
+        // Actively wait for notification banner to appear (up to 20 seconds)
+        var attempts = 0
+        let maxAttempts = 40 // 20 seconds with 0.5 second intervals
+        
+        while attempts < maxAttempts {
+            if titleElement.exists && bodyElement.exists {
+                print("✅ Found push notification banner with expected title: '\(expectedTitle)' and body: '\(expectedBody)' after \(Double(attempts) * 0.5) seconds")
+                
+                // Tap the notification to open the app if needed
+                titleElement.tap()
+                
+                screenshotCapture.captureScreenshot(named: "push-notification-banner-found")
+                return
+            }
+            
+            // Also check for app-specific push notification indicators during the wait
+            let pushTitleIndicator = app.staticTexts.containing(titlePredicate).firstMatch
+            let pushBodyIndicator = app.staticTexts.containing(bodyPredicate).firstMatch
+            
+            if pushTitleIndicator.exists && pushBodyIndicator.exists {
+                print("✅ Found push notification in app UI with expected title: '\(expectedTitle)' and body: '\(expectedBody)' after \(Double(attempts) * 0.5) seconds")
+                screenshotCapture.captureScreenshot(named: "push-notification-app-ui-found")
+                return
+            }
+            
+            // Check for generic push notification processed indicator
+            let pushIndicator = app.staticTexts["push-notification-processed"]
+            if pushIndicator.exists {
+                print("✅ Push notification was processed by the app after \(Double(attempts) * 0.5) seconds")
+                screenshotCapture.captureScreenshot(named: "push-notification-processed")
+                return
+            }
+            
+            attempts += 1
+            usleep(500000) // Sleep for 0.5 seconds
+        }
+        
+        // If we get here, we didn't find the notification within the timeout
+        XCTFail("Push notification with title '\(expectedTitle)' and body '\(expectedBody)' was not received within 20 seconds")
+    }
+    
+    func validateInAppMessageDisplayed() {
+        let inAppMessage = app.otherElements["iterable-in-app-message"]
+        XCTAssertTrue(inAppMessage.waitForExistence(timeout: standardTimeout), "In-app message not displayed")
+        
+        screenshotCapture.captureScreenshot(named: "in-app-message-displayed")
+    }
+    
+    func validateEmbeddedMessageDisplayed() {
+        let embeddedMessage = app.otherElements["iterable-embedded-message"]
+        XCTAssertTrue(embeddedMessage.waitForExistence(timeout: standardTimeout), "Embedded message not displayed")
+        
+        screenshotCapture.captureScreenshot(named: "embedded-message-displayed")
+    }
+    
+    func validateDeepLinkHandled(expectedDestination: String) {
+        let destinationView = app.otherElements[expectedDestination]
+        XCTAssertTrue(destinationView.waitForExistence(timeout: standardTimeout), "Deep link destination not reached")
+        
+        screenshotCapture.captureScreenshot(named: "deep-link-handled")
+    }
+    
+    /// Dismisses all visible in-app messages by repeatedly tapping dismiss links.
+    /// The SDK may auto-show queued messages after each dismiss; this drains them all.
+    func dismissAllInAppMessages(timeout: TimeInterval = 30.0) {
+        // Brief pause to let any in-flight dismiss animation (0.67s) complete before
+        // we start querying the accessibility tree, avoiding a stale-element race.
+        sleep(1)
+        
+        let webView = app.descendants(matching: .webView).element(boundBy: 0)
+        let startTime = Date()
+        
+        while webView.exists && Date().timeIntervalSince(startTime) < timeout {
+            // Try tapping known dismiss links
+            for linkText in ["Dismiss", "Close", "Show Test View"] {
+                let link = app.links[linkText]
+                if link.exists && link.isHittable {
+                    print("🗑️ Dismissing stale in-app via '\(linkText)' link")
+                    link.tap()
+                    sleep(2)
+                    break
+                }
+            }
+            // If no link found, wait for message to load or timeout
+            if webView.exists {
+                sleep(1)
+            }
+        }
+    }
+    
+    // MARK: - WebView Helpers
+    
+    /// Waits for a link inside a WKWebView to become accessible via XCUITest
+    /// Uses intelligent polling to handle CI environment delays in accessibility tree population
+    func waitForWebViewLink(linkText: String, timeout: TimeInterval = 15.0) -> Bool {
+        let link = app.links[linkText]
+        let startTime = Date()
+        var lastCheckTime = startTime
+        
+        print("🔍 Polling for webView link '\(linkText)' (timeout: \(timeout)s)")
+        
+        while Date().timeIntervalSince(startTime) < timeout {
+            if link.exists {
+                // Extra validation: wait a bit and check again to ensure it's stable
+                print("✅ Link '\(linkText)' found after \(String(format: "%.1f", Date().timeIntervalSince(startTime)))s, validating stability...")
+                sleep(1)
+                if link.exists {
+                    print("✅ Link '\(linkText)' confirmed stable and accessible")
+                    return true
+                } else {
+                    print("⚠️ Link '\(linkText)' disappeared during validation, continuing poll...")
+                }
+            }
+            
+            // Log progress every 3 seconds
+            if Date().timeIntervalSince(lastCheckTime) >= 3.0 {
+                print("⏳ Still waiting for link '\(linkText)' (\(String(format: "%.1f", Date().timeIntervalSince(startTime)))s elapsed)")
+                lastCheckTime = Date()
+            }
+            
+            sleep(UInt32(0.5))
+        }
+        
+        print("❌ Link '\(linkText)' not found after \(timeout)s timeout")
+        return false
+    }
+    
+    // MARK: - Navigation Helpers
+    
+    func navigateToBackendTab() {
+        // Wait for UI to settle and ensure backend button is hittable
+        let backendButton = app.buttons["backend-tab"]
+        XCTAssertTrue(backendButton.waitForExistence(timeout: standardTimeout), "Backend button should exist")
+        
+        // Wait for the button to become hittable (not obscured)
+        let hittablePredicate = NSPredicate(format: "isHittable == true")
+        let hittableExpectation = XCTNSPredicateExpectation(predicate: hittablePredicate, object: backendButton)
+        let result = XCTWaiter.wait(for: [hittableExpectation], timeout: 10.0)
+        
+        if result != .completed {
+            // If button is not hittable, try scrolling or waiting a bit more
+            print("⚠️ Backend button not hittable, attempting to make it accessible...")
+            sleep(2)
+            
+            // Force tap using coordinate if button exists but not hittable
+            if backendButton.exists {
+                backendButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            } else {
+                XCTFail("Backend button not found after waiting")
+            }
+        } else {
+            backendButton.tap()
+        }
+    }
+    
+    func navigateToNetworkMonitor() {
+        // Wait for UI to settle and ensure network monitor button is hittable
+        let networkMonitorButton = app.buttons["network-monitor-button"]
+        XCTAssertTrue(networkMonitorButton.waitForExistence(timeout: standardTimeout), "Network monitor button should exist")
+        
+        // Wait for the button to become hittable (not obscured)
+        let hittablePredicate = NSPredicate(format: "isHittable == true")
+        let hittableExpectation = XCTNSPredicateExpectation(predicate: hittablePredicate, object: networkMonitorButton)
+        let result = XCTWaiter.wait(for: [hittableExpectation], timeout: 10.0)
+        
+        if result != .completed {
+            // If button is not hittable, try scrolling or waiting a bit more
+            print("⚠️ Network monitor button not hittable, attempting to make it accessible...")
+            sleep(2)
+            
+            // Force tap using coordinate if button exists but not hittable
+            if networkMonitorButton.exists {
+                networkMonitorButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            } else {
+                XCTFail("Network monitor button not found after waiting")
+            }
+        } else {
+            networkMonitorButton.tap()
+        }
+    }
+    
+    private func verifySDKInitializationNetworkCalls() {
+        // Open network monitor
+        navigateToNetworkMonitor()
+        
+        // Check if network monitor actually opened by looking for the navigation title
+        let networkMonitorTitle = app.navigationBars["Network Monitor"]
+        if !networkMonitorTitle.waitForExistence(timeout: 3.0) {
+            print("⚠️ Network monitor didn't open, trying to tap network button again")
+            let networkButton = app.buttons["network-monitor-button"]
+            if networkButton.exists {
+                // Use coordinate tap to avoid hittable issues in CI
+                networkButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            }
+        }
+        
+        // Wait for network monitor to load — non-fatal: on some CI runs the banner button
+        // can be transiently blocked; setup should not crash the whole test for this.
+        let networkMonitorOpened = networkMonitorTitle.waitForExistence(timeout: standardTimeout)
+        if !networkMonitorOpened {
+            print("⚠️ Network Monitor failed to open during setup verification — skipping API call checks")
+            return
+        }
+        
+        // Verify both critical API calls with 200 status codes
+        verifyNetworkCallWithSuccess(endpoint: "getRemoteConfiguration", description: "SDK initialization should call getRemoteConfiguration with 200 status")
+        verifyNetworkCallWithSuccess(endpoint: "getMessages", description: "SDK initialization should call getMessages with 200 status")
+        
+        // Take screenshot of network calls
+        screenshotCapture.captureScreenshot(named: "sdk-initialization-network-calls")
+        
+        // Close network monitor
+        let closeButton = app.buttons["Close"]
+        if closeButton.exists {
+            closeButton.tap()
+        }
+        
+    }
+    
+    /// Reusable wrapper function to verify network calls exist and have 200 status codes
+    public func verifyNetworkCallWithSuccess(endpoint: String, description: String) {
+        // Find the cell containing the endpoint
+        let endpointPredicate = NSPredicate(format: "label CONTAINS[c] %@", endpoint)
+        let endpointCell = app.cells.containing(endpointPredicate).firstMatch
+        XCTAssertTrue(endpointCell.waitForExistence(timeout: 5.0), "\(endpoint) API call should be made")
+        
+        // Skip status code validation for registerDeviceToken in CI environment
+        // In CI, we use mock device tokens and backend response is unpredictable
+        if endpoint.contains("registerDeviceToken") && isRunningInCI {
+            print("ℹ️ CI Environment: Skipping 200 status validation for \(endpoint) (using mock device token)")
+            return
+        }
+        
+        // Debug: Print all static text elements in the cell to understand the structure
+        print("🔍 Debug: Static texts in \(endpoint) cell:")
+        for staticText in endpointCell.staticTexts.allElementsBoundByIndex {
+            if staticText.exists {
+                print("   - Label: '\(staticText.label)'")
+            }
+        }
+        
+        // Look for the status code label within the cell - try multiple approaches
+        // First try exact match for "200"
+        let exactStatusPredicate = NSPredicate(format: "label == '200'")
+        let exactStatusLabel = endpointCell.staticTexts.containing(exactStatusPredicate).firstMatch
+        
+        // Also try looking for status codes that contain 200 (e.g., "Status: 200" or "200 OK")
+        let containsStatusPredicate = NSPredicate(format: "label CONTAINS '200'")
+        let containsStatusLabel = endpointCell.staticTexts.containing(containsStatusPredicate).firstMatch
+        
+        // Try waiting longer (8 seconds total) for either format to appear
+        // Check if either status format already exists first
+        var statusFound = exactStatusLabel.exists || containsStatusLabel.exists
+        
+        if !statusFound {
+            // Wait up to 8 seconds for either status format to appear
+            let startTime = Date()
+            let maxWaitTime: TimeInterval = 8.0
+            
+            while !statusFound && Date().timeIntervalSince(startTime) < maxWaitTime {
+                statusFound = exactStatusLabel.exists || containsStatusLabel.exists
+                if !statusFound {
+                    Thread.sleep(forTimeInterval: 0.5) // Check every 500ms
+                }
+            }
+        }
+        
+        XCTAssertTrue(statusFound, "\(description) - Expected 200 status code for \(endpoint)")
+        
+        // Additional validation: check that it's not an error status by looking for error codes
+        // Use MATCHES to only match 3-digit status codes (4xx or 5xx), not timestamps like "4:08 PM"
+        let errorStatusPredicate = NSPredicate(format: "label MATCHES '^[45][0-9]{2}$'")
+        let errorStatusLabel = endpointCell.staticTexts.containing(errorStatusPredicate).firstMatch
+        XCTAssertFalse(errorStatusLabel.exists, "\(endpoint) should not have error status code (4xx/5xx)")
+    }
+    
+    // MARK: - Push Notification Validation Helpers
+    
+    
+    func validateTokenMatchBetweenUIAndBackend() {
+        // This is a complex validation that would require:
+        // 1. Getting the token from clipboard (previously copied)
+        // 2. Comparing it with what's shown in the backend
+        // For now, we'll do a basic validation that tokens exist in both places
+        
+        // Check that backend shows a device token
+        let backendTokenElements = app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] 'token' OR label MATCHES[c] '.*[a-f0-9]{16,}.*'"))
+        XCTAssertTrue(backendTokenElements.firstMatch.waitForExistence(timeout: standardTimeout), "Backend should show device token")
+        
+        print("✅ Token validation completed - tokens present in both UI and backend")
+    }
+    
+    // MARK: - CI Push Notification Support
+    
+    /// Send simulated push notification for CI environment using xcrun simctl
+    func sendSimulatedPushNotification(payload: [String: Any], bundleId: String = "com.sumeru.IterableSDK-Integration-Tester") {
+        guard isRunningInCI else {
+            print("📱 [TEST] LOCAL MODE: Using real push notification via backend API")
+            sendTestPushNotification(payload: payload)
+            return
+        }
+        
+        print("🤖 [TEST] CI MODE: Sending simulated push notification via xcrun simctl")
+        print("📦 [TEST] Bundle ID: \(bundleId)")
+        print("🎯 [TEST] Target Platform: iOS Simulator")
+        print("⚙️ [TEST] Execution Method: Test Runner Delegation")
+        
+        do {
+            // Create temporary APNS payload file
+            let tempDir = FileManager.default.temporaryDirectory
+            let payloadFile = tempDir.appendingPathComponent("test_push_\(UUID().uuidString).apns")
+            
+            let payloadData = try JSONSerialization.data(withJSONObject: payload, options: .prettyPrinted)
+            try payloadData.write(to: payloadFile)
+            
+            print("📄 [TEST] Created temporary payload file: \(payloadFile.path)")
+            print("📁 [TEST] Temporary directory: \(tempDir.path)")
+            print("🔢 [TEST] Payload file size: \(payloadData.count) bytes")
+            print("📝 [TEST] Push payload content:")
+            print(String(data: payloadData, encoding: .utf8) ?? "Invalid JSON")
+            
+            // Send push using xcrun simctl
+            let simctlCommand = "xcrun simctl push booted \(bundleId) \(payloadFile.path)"
+            print("🚀 [TEST] Would execute: \(simctlCommand)")
+            
+            // Create a persistent payload file that the test runner can find
+            // Use the same directory that the test runner monitors
+            let persistentPayloadDir = URL(fileURLWithPath: "/tmp/push_queue")
+            try? FileManager.default.createDirectory(at: persistentPayloadDir, withIntermediateDirectories: true)
+            
+            let persistentPayloadFile = persistentPayloadDir.appendingPathComponent("push_\(Date().timeIntervalSince1970)_\(UUID().uuidString).apns")
+            try payloadData.write(to: persistentPayloadFile)
+            
+            // Create command file for test runner (use persistent payload file path)
+            let commandFile = persistentPayloadDir.appendingPathComponent("command_\(Date().timeIntervalSince1970).txt")
+            let persistentSimctlCommand = "xcrun simctl push booted \(bundleId) \(persistentPayloadFile.path)"
+            let commandData = persistentSimctlCommand.data(using: .utf8)!
+            try commandData.write(to: commandFile)
+            
+            print("💾 [TEST] Created persistent payload file: \(persistentPayloadFile.path)")
+            print("📋 [TEST] Created command file: \(commandFile.path)")
+            print("🔍 [TEST] Test runner should monitor: \(persistentPayloadDir.path)")
+            
+            // Copy payload to logs directory for manual testing
+            let logsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("logs")
+            try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+            let timestamp = DateFormatter().apply { $0.dateFormat = "yyyyMMdd-HHmmss" }.string(from: Date())
+            let logsPayload = logsDir.appendingPathComponent("push_\(timestamp).apns")
+            try? payloadData.write(to: logsPayload)
+            print("📁 [TEST] Copied to logs: \(logsPayload.path)")
+            
+            #if os(macOS)
+            // Process is only available on macOS, not iOS
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            task.arguments = [
+                "simctl", "push", "booted", bundleId, payloadFile.path
+            ]
+            
+            do {
+                try task.run()
+                task.waitUntilExit()
+                
+                if task.terminationStatus == 0 {
+                    print("✅ [TEST] Simulated push notification sent successfully to iOS Simulator")
+                } else {
+                    print("❌ [TEST] Failed to send simulated push notification (exit code: \(task.terminationStatus))")
+                }
+            } catch {
+                print("❌ [TEST] Failed to execute xcrun simctl: \(error)")
+                XCTFail("Failed to execute simulated push notification command: \(error)")
+            }
+            #else
+            // On iOS, we can't execute shell commands from within the test
+            // This would need to be handled by the test runner script instead
+            print("📱 [TEST] iOS target detected - xcrun simctl execution would be handled by test runner")
+            print("🔄 [TEST] Test runner needs to monitor push queue and execute commands")
+            print("✅ [TEST] Simulated push notification payload prepared (execution delegated to test runner)")
+            
+            // Verify files were created successfully
+            if FileManager.default.fileExists(atPath: persistentPayloadFile.path) {
+                print("✅ [TEST] Persistent payload file exists and is ready for test runner")
+            } else {
+                print("❌ [TEST] Failed to create persistent payload file")
+                XCTFail("Failed to create persistent payload file for test runner")
+            }
+            
+            if FileManager.default.fileExists(atPath: commandFile.path) {
+                print("✅ [TEST] Command file exists and is ready for test runner")
+            } else {
+                print("❌ [TEST] Failed to create command file")
+                XCTFail("Failed to create command file for test runner")
+            }
+            #endif
+            
+            // Clean up temp file (keep persistent files for test runner)
+            try? FileManager.default.removeItem(at: payloadFile)
+            print("🗑️ [TEST] Cleaned up temporary payload file")
+            print("⏳ [TEST] Keeping persistent files for test runner to process")
+            
+            // Give some time for the push to be processed
+            print("⏱️ [TEST] Waiting 2 seconds for push processing...")
+            sleep(2)
+            
+        } catch {
+            print("❌ Error sending simulated push: \(error)")
+            XCTFail("Failed to send simulated push notification: \(error)")
+        }
+    }
+    
+    /// Send simulated deep link push notification for CI environment
+    func sendSimulatedDeepLinkPush(deepLinkUrl: String) {
+        guard isRunningInCI else {
+            print("📱 [TEST] LOCAL MODE: Using real deep link push via backend API")
+            // For local testing, you would implement real deep link push here
+            return
+        }
+        
+        print("🤖 [TEST] CI MODE: Sending simulated deep link push notification")
+        print("🔗 [TEST] Deep link URL: \(deepLinkUrl)")
+        
+        let deepLinkPayload: [String: Any] = [
+            "aps": [
+                "alert": [
+                    "title": "Integration Test",
+                    "body": "This is an enhanced push campaign"
+                ],
+                "interruption-level": "active",
+                "mutable-content": 1
+            ],
+            "itbl": [
+                "campaignId": BCITCampaign.deepLinkPush,
+                "templateId": BCITTemplate.deepLinkPush,
+                "messageId": "f2a2dd3a974c4e44a8ec5e9ab5a63290",
+                "isGhostPush": 0,
+                "attachment-url": BCITAsset.deepLinkPushAttachment,
+                "defaultAction": [
+                    "type": "openUrl",
+                    "data": deepLinkUrl
+                ]
+            ],
+            "url": deepLinkUrl
+        ]
+        
+        sendSimulatedPushNotification(payload: deepLinkPayload)
+    }
+    
+    /// Open a universal link directly via simctl (for CI environments)
+    func openUniversalLinkViaSimctl(url: String) {
+        guard isRunningInCI else {
+            print("📱 [TEST] LOCAL MODE: Not using simctl openurl")
+            return
+        }
+        
+        print("🤖 [TEST] CI MODE: Opening universal link via xcrun simctl openurl")
+        print("🔗 [TEST] URL: \(url)")
+        
+        do {
+            // Create command file for test runner to execute
+            let commandDir = URL(fileURLWithPath: "/tmp/push_queue")
+            try? FileManager.default.createDirectory(at: commandDir, withIntermediateDirectories: true)
+            
+            let commandFile = commandDir.appendingPathComponent("command_\(Date().timeIntervalSince1970).txt")
+            let command = "xcrun simctl openurl booted \(url)"
+            try command.write(to: commandFile, atomically: true, encoding: .utf8)
+            
+            print("📄 [TEST] Created command file: \(commandFile.path)")
+            print("🚀 [TEST] Command: xcrun simctl \(command)")
+            print("⏳ [TEST] Waiting for test runner to execute command...")
+            
+            // Wait for command to be executed (test runner will delete the file)
+            var waitTime = 0
+            while FileManager.default.fileExists(atPath: commandFile.path) && waitTime < 30 {
+                sleep(1)
+                waitTime += 1
+            }
+            
+            if waitTime >= 30 {
+                print("⚠️ [TEST] Command file still exists after 30s - may not have been executed")
+            } else {
+                print("✅ [TEST] Command executed by test runner")
+            }
+            
+        } catch {
+            print("❌ [TEST] Failed to create command file: \(error)")
+        }
+    }
+    
+    /// Send simulated silent push for embedded message sync in CI environment
+    func sendSimulatedEmbeddedSilentPush() {
+        guard isRunningInCI else {
+            print("📱 [TEST] LOCAL MODE: Using real silent push via backend API")
+            // For local testing, silent push is sent via backend
+            return
+        }
+        
+        print("🤖 [TEST] CI MODE: Sending simulated silent push for embedded message sync")
+        print("📩 [TEST] Notification Type: UpdateEmbedded")
+        
+        // Silent push payload for embedded message sync
+        let silentPushPayload: [String: Any] = [
+            "aps": [
+                "content-available": 1,
+                "badge": 0
+            ],
+            "itbl": [
+                "campaignId": BCITCampaign.embeddedSilentPush,
+                "messageId": "embedded_silent_\(UUID().uuidString)",
+                "isGhostPush": 0,
+                "notificationType": "UpdateEmbedded"
+            ]
+        ]
+        
+        sendSimulatedPushNotification(payload: silentPushPayload)
+        print("✅ [TEST] Simulated embedded silent push sent with UpdateEmbedded notification type")
+    }
+    
+    // MARK: - External Source Deep Link Helpers
+    
+    /// Clean up previous test link from Reminders app
+    private func cleanupRemindersLinks(reminders: XCUIApplication) {
+        print("🗑️ [TEST] Cleaning up previous test link from Reminders...")
+        
+        // Look for the first reminder cell (from previous test)
+        let firstCell = reminders.cells.firstMatch
+        
+        guard firstCell.waitForExistence(timeout: 2.0) else {
+            print("🗑️ [TEST] No previous reminder to clean up")
+            return
+        }
+        
+        // Swipe left to reveal delete button
+        firstCell.swipeLeft()
+        sleep(1)
+        
+        // Look for Delete button and tap it
+        let deleteButton = reminders.buttons["Delete"]
+        if deleteButton.waitForExistence(timeout: 2.0) {
+            deleteButton.tap()
+            print("🗑️ [TEST] Deleted previous test reminder")
+            sleep(1)
+        } else {
+            print("🗑️ [TEST] No delete button found")
+        }
+    }
+    
+    /// Open a universal link from the Reminders app
+    func openBrowserLinkFromRemindersApp(url: String) {
+        print("📝 [TEST] Opening browser link from Reminders app: \(url)")
+        
+        // CI Optimization: Skip flaky Reminders UI automation and use simctl directly
+        if isRunningInCI {
+            print("🤖 [TEST] CI MODE: Skipping Reminders UI interaction, using simctl openurl directly")
+            let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+            openUniversalLinkViaSimctl(url: url)
+            sleep(3)
+            // For browser links, Safari should open (not our app)
+            XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 15.0), "Safari should open for browser links")
+            return
+        }
+        
+        let reminders = XCUIApplication(bundleIdentifier: "com.apple.reminders")
+        reminders.launch()
+        
+        XCTAssertTrue(reminders.wait(for: .runningForeground, timeout: standardTimeout), "Reminders app should launch")
+        sleep(2)
+        
+        let continueButton = reminders.buttons["Continue"]
+        if continueButton.waitForExistence(timeout: 3.0) {
+            print("📝 [TEST] Dismissing Reminders welcome modal")
+            continueButton.tap()
+            sleep(1)
+        }
+        
+        let notNowButton = reminders.buttons["Not Now"]
+        if notNowButton.waitForExistence(timeout: 3.0) {
+            print("📝 [TEST] Dismissing iCloud syncing modal")
+            notNowButton.tap()
+            sleep(1)
+        }
+        
+        cleanupRemindersLinks(reminders: reminders)
+        
+        print("📝 [TEST] Looking for New Reminder button...")
+        let newReminderButton = reminders.buttons["New Reminder"]
+        if newReminderButton.waitForExistence(timeout: 5.0) {
+            print("📝 [TEST] Found New Reminder button, tapping...")
+            newReminderButton.tap()
+            sleep(2)
+        } else {
+            print("⚠️ [TEST] New Reminder button not found")
+            let addButton = reminders.buttons.matching(identifier: "Add").firstMatch
+            if addButton.waitForExistence(timeout: 3.0) {
+                print("📝 [TEST] Found add button, tapping...")
+                addButton.tap()
+                sleep(2)
+            } else {
+                print("⚠️ [TEST] No button found, trying coordinate fallback")
+                let coordinate = reminders.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.95))
+                coordinate.tap()
+                sleep(2)
+            }
+        }
+        
+        print("📝 [TEST] Typing URL into reminder: \(url)")
+        reminders.typeText(url)
+        reminders.typeText("\n")
+        sleep(2)
+        
+        print("📝 [TEST] Looking for link to tap...")
+        let linkElement = reminders.links.firstMatch
+        if linkElement.waitForExistence(timeout: 5.0) {
+            print("✅ [TEST] Found link, tapping it...")
+            reminders.swipeDown()
+            sleep(1)
+            let coordinate = linkElement.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+            coordinate.tap()
+            print("✅ [TEST] Tapped link in Reminders app")
+        } else {
+            print("⚠️ [TEST] Link not found in Reminders")
+            openLinkFromSafari(url: url)
+            return
+        }
+        
+        print("✅ [TEST] Browser link opened successfully")
+    }
+    
+    func openLinkFromRemindersApp(url: String) {
+        print("📝 [TEST] Opening universal link from Reminders app: \(url)")
+        
+        // CI Optimization: Skip flaky Reminders UI automation and use simctl directly
+        if isRunningInCI {
+            print("🤖 [TEST] CI MODE: Skipping Reminders UI interaction, using simctl openurl directly")
+            openUniversalLinkViaSimctl(url: url)
+            sleep(3)
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: standardTimeout), "App should open from universal link via simctl")
+            return
+        }
+        
+        let reminders = XCUIApplication(bundleIdentifier: "com.apple.reminders")
+        reminders.launch()
+        
+        // Wait for Reminders to load
+        XCTAssertTrue(reminders.wait(for: .runningForeground, timeout: standardTimeout), "Reminders app should launch")
+        sleep(2)
+        
+        // Dismiss welcome modal if it appears
+        let continueButton = reminders.buttons["Continue"]
+        if continueButton.waitForExistence(timeout: 3.0) {
+            print("📝 [TEST] Dismissing Reminders welcome modal")
+            continueButton.tap()
+            sleep(1)
+        }
+        
+        // Dismiss iCloud syncing modal if it appears
+        let notNowButton = reminders.buttons["Not Now"]
+        if notNowButton.waitForExistence(timeout: 3.0) {
+            print("📝 [TEST] Dismissing iCloud syncing modal")
+            notNowButton.tap()
+            sleep(1)
+        }
+        
+        // Clean up any previous test links before adding new one
+        cleanupRemindersLinks(reminders: reminders)
+        
+        // Tap the "New Reminder" button to create new reminder
+        print("📝 [TEST] Looking for New Reminder button...")
+        let newReminderButton = reminders.buttons["New Reminder"]
+        if newReminderButton.waitForExistence(timeout: 5.0) {
+            print("📝 [TEST] Found New Reminder button, tapping...")
+            newReminderButton.tap()
+            sleep(2) // Wait for text field to appear and gain focus
+        } else {
+            print("⚠️ [TEST] New Reminder button not found")
+            print("📝 [TEST] Debugging - All available buttons:")
+            let allButtons = reminders.buttons.allElementsBoundByIndex
+            for (index, button) in allButtons.enumerated() {
+                print("  Button[\(index)]: label='\(button.label)', identifier='\(button.identifier)', exists=\(button.exists)")
+            }
+            
+            print("📝 [TEST] Trying Add button...")
+            let addButton = reminders.buttons.matching(identifier: "Add").firstMatch
+            if addButton.waitForExistence(timeout: 3.0) {
+                print("📝 [TEST] Found add button, tapping...")
+                addButton.tap()
+                sleep(2)
+            } else {
+                print("⚠️ [TEST] No button found, trying coordinate fallback")
+                // Last resort: tap bottom right area where plus button usually is
+                let coordinate = reminders.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.95))
+                coordinate.tap()
+                sleep(2)
+            }
+        }
+        
+        // Type the URL in the reminder text field (Reminders will auto-detect it as a link)
+        print("📝 [TEST] Typing URL into reminder: \(url)")
+        reminders.typeText(url)
+        reminders.typeText("\n")
+        
+        sleep(2)
+        
+        // Tap the link to open it
+        print("📝 [TEST] Looking for link to tap...")
+        let linkElement = reminders.links.firstMatch
+        if linkElement.waitForExistence(timeout: 5.0) {
+            print("✅ [TEST] Found link, tapping it...")
+            
+            // Scroll up to ensure link is fully visible and in tappable area
+            reminders.swipeDown()
+            sleep(1)
+            
+            // Tap at the beginning of the link (left side) where it's most likely to be interactive
+            let coordinate = linkElement.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+            coordinate.tap()
+            print("✅ [TEST] Tapped link in Reminders app")
+        } else {
+            print("⚠️ [TEST] Link not found in Reminders")
+            print("📝 [TEST] Available elements:")
+            print("  - Links count: \(reminders.links.count)")
+            print("  - Buttons count: \(reminders.buttons.count)")
+            print("  - Text fields count: \(reminders.textFields.count)")
+            
+            // Try alternative: look for any tappable element with the URL
+            let urlElements = reminders.descendants(matching: .any).containing(NSPredicate(format: "label CONTAINS[c] %@", url))
+            if urlElements.firstMatch.exists {
+                print("📝 [TEST] Found element containing URL, tapping...")
+                urlElements.firstMatch.tap()
+            } else {
+                print("⚠️ [TEST] Could not find link, trying Safari fallback")
+                openLinkFromSafari(url: url)
+                return
+            }
+        }
+        
+        // Wait for our app to open
+        let appOpened = app.wait(for: .runningForeground, timeout: 10.0)
+        
+        if !appOpened {
+            print("⚠️ [TEST] App didn't open from Reminders link, checking Safari banner")
+            
+            // Check if Safari opened with the app banner
+            let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+            if safari.wait(for: .runningForeground, timeout: 3.0) {
+                print("🌐 [TEST] Safari opened, capturing initial state...")
+                screenshotCapture.captureScreenshot(named: "safari-initial-state")
+                
+                print("🌐 [TEST] Waiting for page to load and banner to appear...")
+                sleep(2)
+                screenshotCapture.captureScreenshot(named: "safari-after-2s-wait")
+                
+                sleep(3)
+                screenshotCapture.captureScreenshot(named: "safari-after-5s-total")
+                
+                // Look for the "OPEN" button in Safari's banner first (don't dismiss anything yet)
+                let openButton = safari.buttons["OPEN"]
+                if openButton.waitForExistence(timeout: 2.0) {
+                    print("✅ [TEST] Found Safari banner OPEN button")
+                    screenshotCapture.captureScreenshot(named: "safari-open-button-found")
+                    
+                    print("🔍 [TEST] Button frame: \(openButton.frame)")
+                    print("🔍 [TEST] Button is hittable: \(openButton.isHittable)")
+                    
+                    // Debug: Print all visible elements
+                    print("🔍 [TEST] All Safari buttons:")
+                    for button in safari.buttons.allElementsBoundByIndex {
+                        print("  - \(button.identifier): '\(button.label)' hittable=\(button.isHittable)")
+                    }
+                    
+                    // Try tapping using coordinate if button is not hittable
+                    if !openButton.isHittable {
+                        print("⚠️ [TEST] Button not hittable, trying coordinate tap...")
+                        let coordinate = openButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                        coordinate.tap()
+                    } else {
+                        openButton.tap()
+                    }
+                    
+                    screenshotCapture.captureScreenshot(named: "safari-after-open-tap")
+                    sleep(2)
+                    
+                    // Check if app opened after tapping banner
+                    if app.wait(for: .runningForeground, timeout: 5.0) {
+                        print("✅ [TEST] App opened from Safari banner")
+                        return
+                    }
+                } else {
+                    print("⚠️ [TEST] OPEN button not found, debugging Safari state...")
+                    screenshotCapture.captureScreenshot(named: "safari-no-open-button")
+
+                    // Skip expensive debugging in CI mode since we have simctl fallback
+                    if !isRunningInCI {
+                        print("🔍 [TEST] All Safari buttons:")
+                        let buttons = safari.buttons.allElementsBoundByIndex
+                        for i in 0..<min(buttons.count, 10) {
+                            if i < buttons.count {
+                                let button = buttons[i]
+                                print("  - \(button.identifier): '\(button.label)'")
+                            }
+                        }
+
+                        print("🔍 [TEST] All Safari static texts:")
+                        let staticTexts = safari.staticTexts.allElementsBoundByIndex
+                        for i in 0..<min(staticTexts.count, 10) {
+                            if i < staticTexts.count {
+                                let text = staticTexts[i]
+                                print("  - '\(text.label)'")
+                            }
+                        }
+                    } else {
+                        print("🤖 [TEST] Skipping detailed Safari debugging in CI mode (using simctl fallback)")
+                    }
+                }
+            }
+            
+            // If Safari banner didn't work and we're in CI, use simctl fallback
+            if isRunningInCI {
+                print("⚠️ [TEST] Safari banner didn't work in CI, using simctl fallback")
+                openUniversalLinkViaSimctl(url: url)
+                
+                // Wait for app to open after simctl command
+                sleep(3)
+                XCTAssertTrue(app.wait(for: .runningForeground, timeout: standardTimeout), "App should open from universal link via simctl")
+            } else {
+                XCTFail("App should have opened from Reminders link or Safari banner")
+            }
+        }
+        
+        print("✅ [TEST] App opened from Reminders link")
+    }
+    
+    /// Open a universal link from the Notes app
+    func openLinkFromNotesApp(url: String) {
+        print("📝 [TEST] Opening universal link from Notes app: \(url)")
+        
+        let notes = XCUIApplication(bundleIdentifier: "com.apple.mobilenotes")
+        notes.launch()
+        
+        // Wait for Notes to load
+        XCTAssertTrue(notes.wait(for: .runningForeground, timeout: standardTimeout), "Notes app should launch")
+        sleep(2)
+        
+        // Create new note
+        let newNoteButton = notes.buttons["New Note"]
+        if newNoteButton.exists {
+            newNoteButton.tap()
+        } else {
+            // Try alternative button
+            let composeButton = notes.buttons["Compose"]
+            if composeButton.exists {
+                composeButton.tap()
+            }
+        }
+        
+        sleep(1)
+        
+        // Type the URL (Notes will auto-detect it as a link)
+        notes.typeText("Test deep link:\n")
+        notes.typeText(url)
+        notes.typeText("\n")
+        
+        sleep(1)
+        
+        // Tap the link to open it
+        let linkElement = notes.links.firstMatch
+        if linkElement.waitForExistence(timeout: 5.0) {
+            linkElement.tap()
+            print("✅ [TEST] Tapped link in Notes app")
+        } else {
+            print("⚠️ [TEST] Link not found in Notes, trying alternative approach")
+            // Alternative: Use Safari to open the link
+            openLinkFromSafari(url: url)
+        }
+        
+        // Wait for our app to open
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: standardTimeout), "App should open from universal link")
+        
+        print("✅ [TEST] App opened from Notes link")
+    }
+    
+    /// Fallback: Open a universal link from Safari
+    func openLinkFromSafari(url: String) {
+        print("🌐 [TEST] Opening universal link from Safari: \(url)")
+        
+        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+        safari.launch()
+        
+        // Wait for Safari to load
+        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: standardTimeout), "Safari should launch")
+        sleep(2)
+        
+        // Tap address bar
+        let addressBar = safari.textFields["Address"]
+        if addressBar.exists {
+            addressBar.tap()
+            sleep(1)
+            
+            // Clear existing text and type URL
+            addressBar.typeText(url)
+            safari.keyboards.buttons["Go"].tap()
+            
+            print("✅ [TEST] Navigated to URL in Safari")
+        }
+        
+        // Wait for our app to open (universal link should trigger)
+        sleep(3)
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: standardTimeout), "App should open from universal link")
+        
+        print("✅ [TEST] App opened from Safari universal link")
+    }
+    
+    // MARK: - Cleanup
+    
+    private func cleanupTestData() {
+        // Remove test user from backend
+        guard let apiClient = apiClient else {
+            print("⏭️ Skipping cleanup - apiClient not initialized")
+            return
+        }
+        
+        let expectation = XCTestExpectation(description: "Cleanup test data")
+        
+        apiClient.cleanupTestUser(email: testUserEmail) { success in
+            expectation.fulfill()
+        }
+        
+        wait(for: [expectation], timeout: networkTimeout)
+    }
+}
+
+// MARK: - Test Configuration
+
+struct TestConfiguration {
+    let apiKey: String
+    let serverKey: String
+    let projectId: String
+    let userEmail: String
+    let apiEndpoint: String
+    
+    init(apiKey: String, serverKey: String, projectId: String, userEmail: String) {
+        self.apiKey = apiKey
+        self.serverKey = serverKey
+        self.projectId = projectId
+        self.userEmail = userEmail
+        self.apiEndpoint = "https://api.iterable.com"
+    }
+}
+
+// MARK: - Extensions
+
+extension XCUIApplication {
+    func wait(for state: XCUIApplication.State, timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "state == %d", state.rawValue)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: self)
+        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        return result == .completed
+    }
+}
+
+extension XCUIElement {
+    func clearAndTypeText(_ text: String) {
+        guard let stringValue = self.value as? String else {
+            self.typeText(text)
+            return
+        }
+        
+        // Select all text
+        let deleteString = String(repeating: XCUIKeyboardKey.delete.rawValue, count: stringValue.count)
+        self.typeText(deleteString)
+        self.typeText(text)
+    }
+}

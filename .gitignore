@@ -1,9 +1,22 @@
 .DS_Store
 xcuserdata
 
+.claude/
+
+tests/business-critical-integration/logs
+tests/business-critical-integration/integration-test-app/config
+tests/business-critical-integration/reports
+tests/business-critical-integration/screenshots
+
+.githooks
+.env
+
 .swiftpm/
 
+.claude
+
 *~
+Gemfile.lock
 Podfile.lock
 Pods/
 
@@ -28,3 +41,6 @@ CI.swift
 .build/workspace-state.json
 *.mdb
 .build/arm64-apple-macosx/debug/IterableSDK.build/output-file-map.json
+.build
+.mcp.json
+.githooks/

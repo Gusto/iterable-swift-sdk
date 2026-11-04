@@ -1,29 +1,209 @@
 name: Build and test
 
-on: pull_request
+on:
+  pull_request:
+  push:
+    branches:
+      - master
 
 jobs:
   run-tests-job:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
       - uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0
         with:
-          xcode-version: latest-stable
+          xcode-version: '16.4'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
       - name: Setup Ruby and xcpretty
         run: |
           gem install erb
           gem install xcpretty
 
+      - name: Print available simulators
+        run: xcrun simctl list devices | cat
+
+      - name: Get latest stable iOS version
+        id: ios-version
+        run: |
+          # First try to find iOS 18.x that's available
+          LATEST_IOS=$(xcrun simctl list runtimes | grep "iOS 18" | grep -v "watchOS" | grep -v "beta" | grep -v "Beta" | grep -v "unavailable" | tail -1 | sed 's/.*iOS \([0-9]*\.[0-9]*\).*/\1/')
+          
+          # If no iOS 18.x available, fall back to any available iOS version
+          if [ -z "$LATEST_IOS" ]; then
+            echo "No iOS 18.x available, falling back to latest available iOS version..."
+            LATEST_IOS=$(xcrun simctl list runtimes | grep "iOS" | grep -v "watchOS" | grep -v "beta" | grep -v "Beta" | grep -v "unavailable" | tail -1 | sed 's/.*iOS \([0-9]*\.[0-9]*\).*/\1/')
+          fi
+          
+          echo "version=$LATEST_IOS" >> $GITHUB_OUTPUT
+          echo "Latest stable iOS version: $LATEST_IOS"
+
       - name: Build and test
         run: |
-          xcodebuild test -project swift-sdk.xcodeproj -scheme swift-sdk -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16 Pro' -enableCodeCoverage YES CODE_SIGNING_REQUIRED=NO | xcpretty && exit ${PIPESTATUS[0]}
+          xcodebuild test -project swift-sdk.xcodeproj -scheme swift-sdk -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=${{ steps.ios-version.outputs.version }}' -enableCodeCoverage YES -resultBundlePath TestResults.xcresult CODE_SIGNING_REQUIRED=NO | xcpretty && exit ${PIPESTATUS[0]}
+ 
+      - name: Process test results
+        run: |
+          python3 scripts/process_xcresult.py --path TestResults.xcresult --test-output test-results.html --coverage-output coverage-results.html --test-plan tests/swift-sdk.xctestplan --summary-json test-summary.json --commit-sha ${{ github.sha }}
+        if: success() || failure()
+
+      - name: Create Test Report Check
+        uses: actions/github-script@v7
+        if: success() || failure()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            // Read the test results and coverage reports
+            let testReport = "";
+            let coverageReport = "";
+            
+            try {
+              testReport = fs.readFileSync("test-results.html", 'utf8');
+              coverageReport = fs.readFileSync("coverage-results.html", 'utf8');
+            } catch (error) {
+              core.warning(`Error reading report files: ${error.message}`);
+            }
+            
+            // Read test summary
+            let testStats = {
+              total_tests: 0,
+              passed_tests: 0,
+              failed_tests: 0,
+              success_rate: 0,
+              skipped_tests: 0
+            };
+            
+            try {
+              const summaryJson = fs.readFileSync("test-summary.json", 'utf8');
+              testStats = JSON.parse(summaryJson);
+              
+              // Generate simple markdown summary
+              fs.writeFileSync("report-summary.md",
+                `# Test Results\n\n` +
+                `- Total: ${testStats.total_tests}\n` +
+                `- Passed: ${testStats.passed_tests}\n` +
+                `- Failed: ${testStats.failed_tests}\n` +
+                `- Success: ${(testStats.success_rate).toFixed(1)}%\n`
+              );
+            } catch (error) {
+              core.warning(`Error reading test summary: ${error.message}`);
+            }
+            
+            // Clean and optimize HTML for GitHub Check Run API
+            function stripHtml(html) {
+              if (!html) return '';
+              
+              return html
+                // Remove problematic elements
+                .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+                .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+                // Clean up complex attributes but keep basic structure
+                .replace(/\s*(class|id|dir|data-[^=]*|role|aria-[^=]*|tabindex)="[^"]*"/gi, '')
+                .replace(/\s*(markdown-accessiblity-table|data-catalyst)="[^"]*"/gi, '')
+                // Remove GitHub-specific elements that don't render in Check Runs
+                .replace(/<g-emoji[^>]*>.*?<\/g-emoji>/gi, '⚠️')
+                .replace(/<clipboard-copy[\s\S]*?<\/clipboard-copy>/gi, '')
+                .replace(/<div class="zeroclipboard-container[\s\S]*?<\/div>/gi, '')
+                .replace(/<div class="snippet-clipboard-content[\s\S]*?<\/div>/gi, '')
+                // Clean up excessive whitespace
+                .replace(/\s+/g, ' ')
+                .replace(/>\s+</g, '><')
+                .trim();
+            }
+            
+            // Function to safely truncate content to fit byte limit
+            function truncateToByteLimit(text, maxBytes) {
+              if (!text) return '';
+              
+              // Convert to bytes to check actual size
+              const encoder = new TextEncoder();
+              let bytes = encoder.encode(text);
+              
+              if (bytes.length <= maxBytes) {
+                return text;
+              }
+              
+              // Binary search to find the maximum length that fits
+              let left = 0;
+              let right = text.length;
+              let result = '';
+              
+              while (left <= right) {
+                const mid = Math.floor((left + right) / 2);
+                const substring = text.substring(0, mid);
+                const substringBytes = encoder.encode(substring);
+                
+                if (substringBytes.length <= maxBytes) {
+                  result = substring;
+                  left = mid + 1;
+                } else {
+                  right = mid - 1;
+                }
+              }
+              
+              // Add truncation indicator if content was cut off
+              if (result.length < text.length) {
+                const truncateMsg = '\n\n... (truncated due to size limits)';
+                const truncateMsgBytes = encoder.encode(truncateMsg);
+                
+                if (encoder.encode(result).length + truncateMsgBytes.length <= maxBytes) {
+                  result += truncateMsg;
+                }
+              }
+              
+              return result;
+            }
+            
+            // Extract and clean content
+            const cleanTestReport = stripHtml(testReport);
+            const cleanCoverageReport = stripHtml(coverageReport);
+            
+            // Create concise summary focusing on key information
+            const summaryContent = `Test Results Summary:
+            • Total Tests: ${testStats.total_tests}
+            • Passed: ${testStats.passed_tests}
+            • Failed: ${testStats.failed_tests}
+            • Skipped: ${testStats.skipped_tests || 0}
+            • Success Rate: ${(testStats.success_rate || 0).toFixed(1)}%
+            
+            ${cleanTestReport}`;
+            
+            // Ensure summary fits within GitHub's 65535 byte limit (leaving some buffer)
+            const truncatedSummary = truncateToByteLimit(summaryContent, 65000);
+            
+            // Ensure coverage report fits within the text field limit
+            const truncatedCoverage = truncateToByteLimit(cleanCoverageReport, 65000);
+            
+            // Create the check with test results
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Unit Test Results',
+              head_sha: context.payload.pull_request?.head.sha || context.sha,
+              status: 'completed',
+              conclusion: testStats.failed_tests > 0 ? 'failure' : 'success',
+              output: {
+                title: `Tests: ${testStats.passed_tests}/${testStats.passed_tests + testStats.failed_tests} passed (${(testStats.success_rate || 0).toFixed(1)}%) Skipped: ${testStats.skipped_tests || 0}`,
+                summary: truncatedSummary,
+                text: truncatedCoverage
+              }
+            });
+
+      - name: Upload coverage report to codecov.io
+        if: success() || failure()
+        uses: codecov/codecov-action@v4.1.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: Iterable/iterable-swift-sdk
 
       - name: CocoaPods lint
         run: pod lib lint --allow-warnings
-
-      - name: Upload coverage report to codecov.io
-        run: bash <(curl -s https://codecov.io/bash) -X gcov -J 'IterableSDK' -J 'IterableAppExtensions'

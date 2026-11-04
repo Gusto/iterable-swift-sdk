@@ -2,9 +2,145 @@
 
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
-
 ## [Unreleased]
-- Adding section for unreleased changes
+
+## [6.7.5]
+### Added
+- Added at least once delivery for JSON-only in-app messages through `IterableInAppDelegate.onJsonOnlyMessageAvailable(message:)` and `iterableJsonOnlyInAppMessageAvailable` (Objective-C: `IterableAPI.jsonOnlyInAppMessageAvailableNotification`). Messages are saved to local storage before signaling and replay on foreground until acknowledged. Unhandled messages remain available through `IterableAPI.getUnhandledJsonOnlyMessages()` until acknowledged with `markJsonOnlyMessageHandled(messageId:)`; acknowledgement records a payload fingerprint (bounded to the latest 100 per user) so the same message ID with a changed payload is delivered again. Callbacks are invoked without SDK locks held; see the API documentation for the identity overlap contract.
+
+### Fixed
+- Public `inAppConsume` APIs now remove messages locally and post `iterableInboxChanged` after the local state is updated. The notification fires only when an inbox message changes, so removing popups or JSON-only messages no longer announces an inbox change.
+- In-app fetch, delivery, and merge are now scoped to the user identity that started them, so a login or logout during processing can no longer deliver or persist the previous user's messages.
+- Fixed offline-queued requests replaying an expired JWT forever. Tasks persisted while the token was expired kept the stale token in their payload, so they failed with a 401 on every retry even after a successful refresh, and could block the rest of the offline queue. The task processor now stamps the current auth token at execution time, matching online behavior, which also heals tasks already stuck in the queue.
+
+## [6.7.4]
+### Added
+- Added optional `onCriteriaReceived(criteria:)` and `onCriteriaFetchFailed(reason:)` callbacks to `IterableUnknownUserHandler` for unknown user activation criteria fetch results. These callbacks are invoked on the main thread and may fire on every criteria fetch, including initialization, foreground fetches, and when visitor usage tracking is enabled.
+
+### Fixed
+- In-app HTML render failures now log the message ID and error, and messages are dismissed if the WKWebView content process terminates.
+
+## [6.7.3]
+### Added
+- Added `async`/`await` variants of the device-disabling methods: `disableDeviceForCurrentUser() async throws` and `disableDeviceForAllUsers() async throws`. These are additive — the existing completion-handler methods are unchanged. On failure they throw the public `SendRequestError`.
+- Added a `logoutUser(withOnSuccess:onFailure:)` overload to `IterableAPI`. Since logout is local-only, the handlers reflect the `disableDeviceForCurrentUser` call triggered when `autoPushRegistration` is enabled. The parameterless `logoutUser()` is unchanged.
+- `AuthFailureReason` now conforms to `CustomDebugStringConvertible`, so the `Int`-backed enum prints readable case names (for example, `authTokenExpired`) in logs.
+
+### Fixed
+- Fixed a crash showing out-of-the-box embedded messages on CocoaPods. `IterableEmbeddedView.xib` moved out of `Resources/` in 6.5.9, but the podspec only bundled `Resources/`, so the nib was missing from the CocoaPods resource bundle and `loadViewFromNib()` crashed. The podspec now bundles the UI component XIBs too. SPM was not affected.
+- Fixed in-app message positioning in landscape on devices with a notch or Dynamic Island. The webview width and horizontal center now account for the left and right safe-area insets, so top, bottom, and center messages stay within the safe area instead of running under the notch. Full-screen messages are unchanged.
+- Fixed a `String`-length conflation (CWE-135) in `DeepLinkManager.isIterableDeepLink`. The regex search range is now built from the bridged `NSString.length` (UTF-16) instead of the Swift `String` grapheme-cluster count, so deep links containing non-BMP characters such as emoji are no longer missed.
+
+### Changed
+- `IterableAPI.register(token:)` is now routed through the offline queue, so a push token registration made while offline is automatically retried when connectivity returns instead of being dropped. The current user identity is captured at call time, so the queued request still targets the correct user after a logout or user switch. Calling `register(token:)` without a current user identity now reports `onFailure` instead of silently sending the request.
+- Upgrade-then-downgrade hazard on UUA storage: the sessions blob in `UserDefaults` now encodes with `totalUnknownSessionCount` / `lastUnknownSession` / `firstUnknownSession`, and stored UUA events use `eventType` as the type discriminator. A customer who installs an SDK build with this change and later rolls back to a pre-SDK-412 build will hit a decode failure on the sessions blob (unknown user session counter resets to zero) and stored UUA events will be skipped on flush since the older SDK looks for `dataType`. Limited blast radius, but worth flagging for customers who pin or roll back versions.
+
+## [6.7.2]
+### Added
+- Added optional `shouldLog(level:) -> Bool` to `IterableLogDelegate`. Defaults to `true` when not implemented. Lets the delegate short-circuit log calls before any message formatting work happens. `DefaultLogDelegate` routes its `minLogLevel` filter through this, and `NoneLogDelegate` returns `false` for every level.
+
+### Fixed
+- Fixed a memory leak in `NetworkMonitor` where `NWPathMonitor` and the monitor wrapper were retained for the lifetime of the app across foreground/background cycles. `start()` is now idempotent, captures `self` weakly in `pathUpdateHandler`, and `stop()` reliably cancels and releases the monitor. Resolves GitHub issue #867.
+- Fixed a Swift access race in `Pending`/`Fulfill` flagged by Thread Sanitizer. All reads and writes of `result`, `successCallbacks`, and `errorCallbacks` now run on a private serial queue, with callbacks invoked outside the critical section so re-entrant registrations cannot deadlock. Also fixes a latent O(N²) firing path when registering callbacks against an already-resolved `Pending`. Resolves GitHub issue #767.
+- Fixed orphaned `Pending` chains in the JWT auth retry path. When token refresh hits the retry cap, is paused, or runs after logout, callers are now notified through a new `onRetryExhausted` callback instead of being silently dropped, preventing upstream awaiters from hanging forever.
+
+### Changed
+- `IterableAPI.disableDeviceForCurrentUser` and `disableDeviceForAllUsers` are now routed through the offline queue, so a `disableDevice` call made while offline is automatically retried when connectivity returns. The original user identity is captured at call time, so the queued request still targets the correct user after logout or user switch. Queued `disableDevice` tasks are also preserved across logout while other queued work is still purged.
+- Cached the `DateFormatter` used by `IterableLogUtil` as a `private static let` and skip message formatting entirely when the log delegate filters the level out. Fixes a 2.4–3.2s main-thread hang observed on foreground transitions in apps with a restrictive `minLogLevel`.
+
+## [6.7.1]
+### Fixed
+- Fixed the `enableUnknownUserActivation` default value to `false`
+
+## [6.7.0]
+
+### Added
+- Added `IterableAPI.lastAuthTokenState` property to expose JWT auth token validity as an `AuthTokenValidityState` enum (`.unknown`, `.valid`, `.invalid`).
+- Auto-retry for JWT 401 failures during offline event processing — the SDK now pauses, refreshes the token, and retries the failed task automatically.
+
+### Fixed
+- Fixed in-app messages not displaying during sync cooldown periods when using `inAppDisplayDelegate`.
+- Improved offline retry logic to distinguish transient failures (5xx, network errors, 429) from permanent client errors (4xx).
+- Added network connectivity debounce (3-second window) to prevent rapid pause/resume cycles in the offline task runner.
+
+### Removed
+- Removed deprecated `trackEmbeddedDismiss` and `trackEmbeddedImpression` methods and their underlying API endpoints.
+
+## [6.6.7]
+### Fixed
+- Fixed module export for CocoaPods, enabling Obj-C/C++ compatibility
+- Added `extern "C"` guards to umbrella headers (`IterableSDK.h`, `IterableAppExtensions.h`) for C++ compatibility
+- Renamed CocoaPods resource bundle from `Resources` to `IterableSDKResources` to avoid naming collisions with other pods, with automatic fallback to the legacy name
+
+## [6.6.6]
+### Fixed 
+- Fixed more Carthage issues
+- Fixed issue that prevented multiple applications using a shared keychain access group.
+- Improves in-app full screen position to display over the entire screen includind the status bar.
+
+### Added
+- Made `isIterableDeepLink` method public
+
+## [6.6.5]
+### Fixed
+- Fixed an issue where concurrent API requests failing with JWT-related 401 errors could be dropped instead of retried after a new token was obtained, ensuring all affected calls are executed once authentication succeeds.
+
+### Added
+- Added optional Embedded Messaging sync callbacks via the `IterableEmbeddedUpdateDelegate` protocol, allowing apps to react when an embedded sync succeeds or fails.
+- Added an optional `placementIds` parameter to `syncMessages` on `IterableEmbeddedManager`, so apps can fetch and update embedded messages only for specific placements, bringing iOS to parity with the Android SDK.
+
+## [6.6.4]
+
+- Fixed Carthage builds on Xcode 26 and Swift version 6.2.
+- Fixed Objective-C compatability issue with the `AuthFailure` class
+- Fixed Embedded Messages impressions analytics bug
+
+## [6.6.3]
+
+- Fixed an issue with In-App Messages where JWT Tokens were not being refreshed after tokens got invalidated.
+
+## [6.6.2]
+
+- Reverted a change to the deeplinking redirect flow introduced in 6.5.13 that caused link redirection issues for some users
+
+## [6.6.1]
+
+- Added support for iOS 26
+
+## [6.6.0]
+
+### Added
+
+- Introduces support for Unknown user activation, a feature that allows marketers to convert valuable visitors into customers. With this feature, the SDK can:
+  - Fetch unknown user profile creation criteria from your Iterable project, and then automatically create Iterable user profiles for Unknown users who meet these criteria.
+  - Save information about a user's previous interactions with your application to their unknown user profile, after it's created.
+  - Display personalized messages for Unknown users (in-app, push, and embedded messages).
+  - Merge unknown user profiles into existing, known user profiles (when needed).
+- `IterableConfig` is updated with an `enableUnknownUserActivation` flag that needs to be set to true to allow use of the unknown user activation functionality
+- Unknown user activation is currently in public beta. If you'd like to learn more about it or discuss using it, talk to your Iterable customer success manager (who can also provide detailed documentation).
+- To learn more, read [Unknown User Activation: Developer Docs](https://support.iterable.com/hc/sections/40078809116180).
+
+## [6.5.14]
+- Added `IterableInAppDisplayDelegate` protocol for dynamic control over in-app message display timing```
+
+## [6.5.13]
+- Fixed in-app messages displaying in wrong window when using Stage Manager or multi-window scenarios on iPad.
+- Fixed redirect handling issue with deep links that was preventing proper URL following.
+- Improved action runner logic to properly validate allowed protocols before processing URL actions, ensuring better security and reliability.
+
+## [6.5.12]
+- Made `IterableDataRegion` an `@objc` class for better Objective-C compatibility.
+- Improved robustness of the SDK by adding more internal initialization checks before executing certain operations.
+- Enhanced thread safety for embedded message data handling, leading to increased stability.
+- Improved `IterableEmbeddedView` by making `imgView` and `cardImageView` optional, leading to more robust view handling, particularly for `.card` and `.banner` types when images might not be present.
+- Minor refinements to authentication and token refresh logic for increased stability.
+
+## [6.6.0-beta3]
+
+- This release includes fixes for the Unknown user activation private beta:
+    - Criteria is now fetched on foregrounding the app by default. This feature can be turned off setting enableForegroundCriteriaFetch flag to false. 
+    - Unknown user ids are only generated once when multiple track calls are made.
+- Unknown user activation is currently in private beta. If you'd like to learn more about it or discuss using it, talk to your Iterable customer success manager (who can also provide detailed documentation).
 
 ## [6.5.11]
 ### Fixed
@@ -33,6 +169,19 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 - Updated repository name on Fastline script and podspec files.
 - Comments out outdated tests that need to be revisited.
 - Updated sample app to use generic URLs.
+
+## [6.6.0-beta2]
+
+- This release fixes beta1 release which was released from the wrong branch.
+
+## [6.6.0-beta1]
+
+- This release includes initial support for Unknown user activation, a feature that allows marketers to convert valuable visitors into customers. With this feature, the SDK can:
+  - Fetch unknown user profile creation criteria from your Iterable project, and then automatically create Iterable user profiles for Unknown users who meet these criteria.
+  - Save information about a user's previous interactions with your application to their unknown user profile, after it's created.
+  - Display personalized messages for Unknown users (in-app, push, and embedded messages).
+  - Merge unknown user profiles into an existing, known user profiles (when needed).
+- Unknown user activation is currently in private beta. If you'd like to learn more about it or discuss using it, talk to your Iterable customer success manager (who can also provide detailed documentation).
 
 ## [6.5.7]
 ### Fixed

@@ -148,7 +148,7 @@ class RequestCreatorTests: XCTestCase {
     }
     
     func testGetInAppMessagesRequestFailure() {
-        let auth = Auth(userId: nil, email: nil, authToken: nil)
+        let auth = Auth(userId: nil, email: nil, authToken: nil, userIdUnknownUser: nil)
         let requestCreator = RequestCreator(auth: auth, deviceMetadata: deviceMetadata)
         
         let failingRequest = requestCreator.createGetInAppMessagesRequest(1)
@@ -176,6 +176,58 @@ class RequestCreatorTests: XCTestCase {
         XCTAssertEqual(args[JsonKey.InApp.packageName], Bundle.main.appPackageName)
         XCTAssertEqual(args[JsonKey.InApp.count], inAppMessageRequestCount.stringValue)
         XCTAssertEqual(args[JsonKey.systemVersion], UIDevice.current.systemVersion)
+    }
+
+    func testGetEmbeddedMessagesRequestFailure() {
+        let auth = Auth(userId: nil, email: nil, authToken: nil, userIdUnknownUser: nil)
+        let requestCreator = RequestCreator(auth: auth, deviceMetadata: deviceMetadata)
+        
+        let failingRequest = requestCreator.createGetEmbeddedMessagesRequest(placementIds: nil)
+        
+        if let _ = try? failingRequest.get() {
+            XCTFail("request succeeded despite userId and email being nil")
+        }
+    }
+    
+    func testGetEmbeddedMessagesRequest() {
+        let request = createRequestCreator().createGetEmbeddedMessagesRequest(placementIds: nil)
+        let urlRequest = convertToUrlRequest(request)
+        
+        TestUtils.validateHeader(urlRequest, apiKey)
+        TestUtils.validate(request: urlRequest, requestType: .get, apiEndPoint: Endpoint.api, path: Const.Path.getEmbeddedMessages)
+
+        guard let url = urlRequest.url, let urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            XCTFail("could not create URLComponents from request url")
+            return
+        }
+
+        let queryItems = urlComponents.queryItems ?? []
+        XCTAssertEqual(queryItems.first(where: { $0.name == JsonKey.email })?.value, auth.email)
+        XCTAssertEqual(queryItems.first(where: { $0.name == JsonKey.Embedded.packageName })?.value, Bundle.main.appPackageName)
+        XCTAssertEqual(queryItems.first(where: { $0.name == JsonKey.systemVersion })?.value, UIDevice.current.systemVersion)
+        XCTAssertTrue(queryItems.filter { $0.name == JsonKey.Embedded.placementIds }.isEmpty)
+    }
+    
+    func testGetEmbeddedMessagesRequestWithPlacementIds() {
+        let request = createRequestCreator().createGetEmbeddedMessagesRequest(placementIds: [1, 2, 3])
+        let urlRequest = convertToUrlRequest(request)
+        
+        TestUtils.validateHeader(urlRequest, apiKey)
+        TestUtils.validate(request: urlRequest, requestType: .get, apiEndPoint: Endpoint.api, path: Const.Path.getEmbeddedMessages)
+
+        guard let url = urlRequest.url, let urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            XCTFail("could not create URLComponents from request url")
+            return
+        }
+
+        let queryItems = urlComponents.queryItems ?? []
+        XCTAssertEqual(queryItems.first(where: { $0.name == JsonKey.email })?.value, auth.email)
+
+        let placementIds = queryItems
+            .filter { $0.name == JsonKey.Embedded.placementIds }
+            .compactMap(\.value)
+
+        XCTAssertEqual(placementIds, ["1", "2", "3"])
     }
     
     func testTrackEventRequest() {
@@ -343,10 +395,10 @@ class RequestCreatorTests: XCTestCase {
         TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.preferUserId), value: true, inDictionary: body)
         
         // Add assertions for mobile framework info
-        TestUtils.validateMatch(keyPath: KeyPath(string: "mobileFrameworkInfo.frameworkType"), 
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.device, JsonKey.dataFields, JsonKey.mobileFrameworkInfo, JsonKey.frameworkType), 
                               value: "native", 
                               inDictionary: body)
-        TestUtils.validateMatch(keyPath: KeyPath(string: "mobileFrameworkInfo.iterableSdkVersion"), 
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.device, JsonKey.dataFields, JsonKey.mobileFrameworkInfo, JsonKey.iterableSdkVersion), 
                               value: testSdkVersion, 
                               inDictionary: body)
     }
@@ -377,9 +429,9 @@ class RequestCreatorTests: XCTestCase {
     
     private let locationKeyPath = "\(JsonKey.inAppMessageContext).\(JsonKey.inAppLocation)"
     
-    private let userlessAuth = Auth(userId: nil, email: nil, authToken: nil)
+    private let userlessAuth = Auth(userId: nil, email: nil, authToken: nil, userIdUnknownUser: nil)
     
-    private let userIdAuth = Auth(userId: "ein", email: nil, authToken: nil)
+    private let userIdAuth = Auth(userId: "ein", email: nil, authToken: nil, userIdUnknownUser: nil)
     
     private let deviceMetadata = DeviceMetadata(deviceId: IterableUtil.generateUUID(),
                                                 platform: JsonValue.iOS,
@@ -433,10 +485,104 @@ class RequestCreatorTests: XCTestCase {
     private func getEmptyInAppContent() -> IterableHtmlInAppContent {
         IterableHtmlInAppContent(edgeInsets: .zero, html: "")
     }
+    
+    // MARK: - Consent Request Tests
+    
+    func testCreateTrackConsentRequestWithEmail() {
+        let consentTimestamp: Int64 = 1639490139
+        let email = "test@example.com"
+        
+        let urlRequest = convertToUrlRequest(createRequestCreator().createTrackConsentRequest(
+            consentTimestamp: consentTimestamp,
+            email: email,
+            userId: nil,
+            isUserKnown: true
+        ))
+        
+        TestUtils.validateHeader(urlRequest, apiKey)
+        TestUtils.validate(request: urlRequest, requestType: .post, apiEndPoint: Endpoint.api, path: Const.Path.trackConsent)
+        
+        let body = urlRequest.bodyDict
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.consentTimestamp), value: Int(consentTimestamp), inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.email), value: email, inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.isUserKnown), value: true, inDictionary: body)
+        XCTAssertNil(body[JsonKey.userId])
+        
+        TestUtils.validateDeviceInfo(inBody: body, withDeviceId: deviceMetadata.deviceId)
+    }
+    
+    func testCreateTrackConsentRequestWithUserId() {
+        let consentTimestamp: Int64 = 1639490139
+        let userId = "test-user-123"
+        
+        let urlRequest = convertToUrlRequest(createRequestCreator().createTrackConsentRequest(
+            consentTimestamp: consentTimestamp,
+            email: nil,
+            userId: userId,
+            isUserKnown: false
+        ))
+        
+        TestUtils.validateHeader(urlRequest, apiKey)
+        TestUtils.validate(request: urlRequest, requestType: .post, apiEndPoint: Endpoint.api, path: Const.Path.trackConsent)
+        
+        let body = urlRequest.bodyDict
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.consentTimestamp), value: Int(consentTimestamp), inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.userId), value: userId, inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.isUserKnown), value: false, inDictionary: body)
+        XCTAssertNil(body[JsonKey.email])
+        
+        TestUtils.validateDeviceInfo(inBody: body, withDeviceId: deviceMetadata.deviceId)
+    }
+    
+    func testCreateTrackConsentRequestWithBothEmailAndUserId() {
+        let consentTimestamp: Int64 = 1639490139
+        let email = "test@example.com"
+        let userId = "test-user-123"
+        
+        let urlRequest = convertToUrlRequest(createRequestCreator().createTrackConsentRequest(
+            consentTimestamp: consentTimestamp,
+            email: email,
+            userId: userId,
+            isUserKnown: true
+        ))
+        
+        TestUtils.validateHeader(urlRequest, apiKey)
+        TestUtils.validate(request: urlRequest, requestType: .post, apiEndPoint: Endpoint.api, path: Const.Path.trackConsent)
+        
+        let body = urlRequest.bodyDict
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.consentTimestamp), value: Int(consentTimestamp), inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.email), value: email, inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.userId), value: userId, inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.isUserKnown), value: true, inDictionary: body)
+        
+        TestUtils.validateDeviceInfo(inBody: body, withDeviceId: deviceMetadata.deviceId)
+    }
+    
+    func testCreateTrackConsentRequestMinimal() {
+        let consentTimestamp: Int64 = 1639490139
+        
+        let urlRequest = convertToUrlRequest(createRequestCreator().createTrackConsentRequest(
+            consentTimestamp: consentTimestamp,
+            email: nil,
+            userId: nil,
+            isUserKnown: false
+        ))
+        
+        TestUtils.validateHeader(urlRequest, apiKey)
+        TestUtils.validate(request: urlRequest, requestType: .post, apiEndPoint: Endpoint.api, path: Const.Path.trackConsent)
+        
+        let body = urlRequest.bodyDict
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.consentTimestamp), value: Int(consentTimestamp), inDictionary: body)
+        TestUtils.validateMatch(keyPath: KeyPath(keys: JsonKey.isUserKnown), value: false, inDictionary: body)
+        XCTAssertNil(body[JsonKey.email])
+        XCTAssertNil(body[JsonKey.userId])
+        
+        TestUtils.validateDeviceInfo(inBody: body, withDeviceId: deviceMetadata.deviceId)
+    }
 }
 
 extension RequestCreatorTests: AuthProvider {
     var auth: Auth {
-        Auth(userId: nil, email: email, authToken: nil)
+        Auth(userId: nil, email: email, authToken: nil, userIdUnknownUser: nil)
     }
 }

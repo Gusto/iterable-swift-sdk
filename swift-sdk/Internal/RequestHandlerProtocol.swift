@@ -7,6 +7,7 @@ import Foundation
 /// `InternalIterableAPI` will delegate all network related calls to this protocol.
 protocol RequestHandlerProtocol: AnyObject {
     var offlineMode: Bool { get set }
+    var autoRetry: Bool { get set }
 
     func start()
     
@@ -44,11 +45,25 @@ protocol RequestHandlerProtocol: AnyObject {
                     onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     
     @discardableResult
+    func updateCart(items: [CommerceItem],
+                    createdAt: Int,
+                    onSuccess: OnSuccessHandler?,
+                    onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+    
+    @discardableResult
     func trackPurchase(_ total: NSNumber,
                        items: [CommerceItem],
                        dataFields: [AnyHashable: Any]?,
                        campaignId: NSNumber?,
                        templateId: NSNumber?,
+                       onSuccess: OnSuccessHandler?,
+                       onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+    
+    @discardableResult
+    func trackPurchase(_ total: NSNumber,
+                       items: [CommerceItem],
+                       dataFields: [AnyHashable: Any]?,
+                       createdAt: Int,
                        onSuccess: OnSuccessHandler?,
                        onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     
@@ -64,6 +79,12 @@ protocol RequestHandlerProtocol: AnyObject {
     @discardableResult
     func track(event: String,
                dataFields: [AnyHashable: Any]?,
+               onSuccess: OnSuccessHandler?,
+               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
+    
+    @discardableResult
+    func track(event: String,
+               withBody body: [AnyHashable: Any]?,
                onSuccess: OnSuccessHandler?,
                onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
     
@@ -129,17 +150,6 @@ protocol RequestHandlerProtocol: AnyObject {
                clickedUrl: String,
                onSuccess: OnSuccessHandler?,
                onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
-    
-    @discardableResult
-    func track(embeddedMessageDismiss message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler?,
-               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
-    
-    @discardableResult
-    func track(embeddedMessageImpression message: IterableEmbeddedMessage,
-               onSuccess: OnSuccessHandler?,
-               onFailure: OnFailureHandler?) -> Pending<SendRequestValue, SendRequestError>
-    
     
     @discardableResult
     func track(embeddedSession: IterableEmbeddedSession,

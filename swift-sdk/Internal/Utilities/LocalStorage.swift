@@ -5,10 +5,18 @@
 import Foundation
 
 struct LocalStorage: LocalStorageProtocol {
+
     init(userDefaults: UserDefaults = UserDefaults.standard,
-         keychain: IterableKeychain = IterableKeychain()) {
+         keychain: IterableKeychain = LocalStorage.createKeychain()) {
         iterableUserDefaults = IterableUserDefaults(userDefaults: userDefaults)
         self.keychain = keychain
+    }
+
+    /// Creates the keychain with isolated storage and legacy wrapper for migration
+    private static func createKeychain() -> IterableKeychain {
+        let isolatedWrapper = KeychainWrapper() // Uses isolated service name by default
+        let legacyWrapper = KeychainWrapper(serviceName: KeychainWrapper.legacyServiceName)
+        return IterableKeychain(wrapper: isolatedWrapper, legacyWrapper: legacyWrapper)
     }
     
     var userId: String? {
@@ -16,6 +24,14 @@ struct LocalStorage: LocalStorageProtocol {
             keychain.userId
         } set {
             keychain.userId = newValue
+        }
+    }
+    
+    var userIdUnknownUser: String? {
+        get {
+            keychain.userIdUnknownUser
+        } set {
+            keychain.userIdUnknownUser = newValue
         }
     }
     
@@ -66,7 +82,63 @@ struct LocalStorage: LocalStorageProtocol {
             iterableUserDefaults.offlineMode = newValue
         }
     }
-    
+
+    var autoRetry: Bool {
+        get {
+            iterableUserDefaults.autoRetry
+        } set {
+            iterableUserDefaults.autoRetry = newValue
+        }
+    }
+
+        var unknownUserEvents: [[AnyHashable: Any]]? {
+        get {
+            iterableUserDefaults.unknownUserEvents
+        } set {
+            iterableUserDefaults.unknownUserEvents = newValue
+        }
+    }
+
+    var unknownUserUpdate: [AnyHashable: Any]? {
+        get {
+            iterableUserDefaults.unknownUserUpdate
+        } set {
+            iterableUserDefaults.unknownUserUpdate = newValue
+        }
+    }
+
+    var unknownUserSessions: IterableUnknownUserSessionsWrapper? {
+        get {
+            iterableUserDefaults.unknownUserSessions
+        } set {
+            iterableUserDefaults.unknownUserSessions = newValue
+        }
+    }
+
+    var criteriaData: Data? {
+        get {
+            iterableUserDefaults.criteriaData
+        } set {
+            iterableUserDefaults.criteriaData = newValue
+        }
+    }
+
+    var visitorUsageTracked: Bool {
+        get {
+            iterableUserDefaults.visitorUsageTracked
+        } set {
+            iterableUserDefaults.visitorUsageTracked = newValue
+        }
+    }
+
+    var visitorConsentTimestamp: Int64? {
+        get {
+            iterableUserDefaults.visitorConsentTimestamp
+        } set {
+            iterableUserDefaults.visitorConsentTimestamp = newValue
+        }
+    }
+
     var isNotificationsEnabled: Bool {
         get {
             iterableUserDefaults.isNotificationsEnabled
@@ -82,6 +154,14 @@ struct LocalStorage: LocalStorageProtocol {
             iterableUserDefaults.hasStoredNotificationSetting = newValue
         }
     }
+
+    var jsonOnlyMessageQueueData: Data? {
+        get {
+            iterableUserDefaults.jsonOnlyMessageQueueData
+        } set {
+            iterableUserDefaults.jsonOnlyMessageQueueData = newValue
+        }
+    }
     
     func getAttributionInfo(currentDate: Date) -> IterableAttributionInfo? {
         iterableUserDefaults.getAttributionInfo(currentDate: currentDate)
@@ -93,9 +173,13 @@ struct LocalStorage: LocalStorageProtocol {
     
     func upgrade() {
         ITBInfo()
-        
+
         /// moves `email`, `userId`, and `authToken` from `UserDefaults` to `IterableKeychain`
         moveAuthDataFromUserDefaultsToKeychain()
+    }
+
+    func migrateKeychainToIsolatedStorage() {
+        keychain.migrateFromLegacy()
     }
     
     // MARK: Private
